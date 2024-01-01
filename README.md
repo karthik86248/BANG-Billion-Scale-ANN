@@ -1,5 +1,4 @@
-# BANG : Billion-Scale Approximate Nearest Neighbor Search
-using a Single GPU
+# BANG : Billion-Scale Approximate Nearest Neighbor Search using a Single GPU
 
 Efficient Approximate Nearest Neighbour Search using GPU. We have three variants of the implementation :
 * BANG_Base : The graph is stored on the host RAM, PQ compressed vectors on GPU.
