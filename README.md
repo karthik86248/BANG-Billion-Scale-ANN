@@ -14,7 +14,7 @@ The source code for each variant is present in the resepctive folders.
 * NVIDIA A100 80GB GPU card
 * CUDA version >= 11.8
 * gcc and g++ 11.0 or higher (C++11 support)
-* Boost library
+* Boost C++ libraries (https://www.boost.org/) version >=1.74
 * DiskANN (follow the instruction in https://github.com/microsoft/DiskANN)
 
 ## Code Build
