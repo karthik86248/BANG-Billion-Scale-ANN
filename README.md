@@ -2,12 +2,12 @@
 
 Efficient Approximate Nearest Neighbour Search using GPU. We have three variants of the implementation :
 * BANG Base : The graph is stored on the host RAM, PQ compressed vectors on GPU.
-* BANG In-memory : The graph and PQ compressed vectors both are store on GPU.
+* BANG In-memory : The graph and PQ compressed vectors, both are stored on GPU.
 * BANG Exact-distance : The graph is stored on GPU. PQ compressed vectors are not used. Distance computations are performed using the base dataset vectors.
 
-Billion scale datasets can be used with Band_Base only.
+Billion scale datasets can be used with BANG Base only.
 
-The source code for each variant is present in the resepctive folders.
+The source code for each variant is present in the respective folders.
 
 ## Prerequisities
 * Sufficient Host RAM to store the graph per the dataset (Highest being 640 GB for DEEP1B)
@@ -15,7 +15,7 @@ The source code for each variant is present in the resepctive folders.
 * CUDA version >= 11.8
 * gcc and g++ 11.0 or higher (C++11 support)
 * Boost C++ libraries (https://www.boost.org/) version >=1.74
-* DiskANN (follow the instruction in https://github.com/microsoft/DiskANN)
+* DiskANN (follow the instructions provided in https://github.com/microsoft/DiskANN)
 
 ## Dataset repositories
 SIFT and GIST datasets can be downloaded from http://corpus-texmex.irisa.fr/
@@ -40,9 +40,11 @@ make
 
 ## Graph Generation
 * Download the base dataset from the respective dataset repository. The base dataset, query vectors and the groundtruth files.
-* Generate the graph using the build_disk_index utility.
-e.g../build_disk_index --data_type uint8 --dist_fn l2 --data_path /mnt/hdd_volume/datasets/sift1b/bigann_base.bin --index_path_prefix sift1b_index -R 64 -L 200 -B 70 -M 48
+* Generate the graph using the *build_disk_index* utility.
 
+```
+e.g../build_disk_index --data_type uint8 --dist_fn l2 --data_path /mnt/hdd_volume/datasets/sift1b/bigann_base.bin --index_path_prefix sift1b_index -R 64 -L 200 -B 70 -M 48
+```
 * The o/p generates several files. Below are required by BANG
 ```
 <X>_index_disk.index -> The Vamana graph. Convet this file to bin format using the index_to_binary_graph.py in utils folder.
@@ -54,7 +56,7 @@ e.g../build_disk_index --data_type uint8 --dist_fn l2 --data_path /mnt/hdd_volum
 ## ANN Search on the generated graph
 
 ```
-./bang <<X>_index_pq_pivots.bin> <<X>_index_pq_compressed.bin> <<X>_index_disk.bin> <query vectors file in bin format> <<X>_index_pq_pivots.bin_chunk_offsets.bin> <<X>_index_pq_pivots.bin_centroid.bin> <groundtruth file in bin format> <# of query vectors> <Thread blocl size of compute_parent kernel> <Thread blocl size of populate_pqDist_par kernel> <Thread blocl size of compute_neighborDist_par kernel> <Thread blocl size of neighbor_filtering_new kernel> <recall factor i.e. top-k> <# of OMP threads> <debug flags>
+./bang <<X>_index_pq_pivots.bin> <<X>_index_pq_compressed.bin> <<X>_index_disk.bin> <query vectors file in bin format> <<X>_index_pq_pivots.bin_chunk_offsets.bin> <<X>_index_pq_pivots.bin_centroid.bin> <groundtruth file in bin format> <# of query vectors> <Thread block size of compute_parent kernel> <Thread block size of populate_pqDist_par kernel> <Thread block size of compute_neighborDist_par kernel> <Thread block size of neighbor_filtering_new kernel> <recall factor i.e. top-k> <# of OMP threads> <debug flags>
 
 ```
 An example is shown below:
@@ -64,5 +66,7 @@ An example is shown below:
 ```
 
 
+## Cost Analysis
+A note on the cost analysis (CapEx+Opex) is uploaded to the root directory.
 
 
