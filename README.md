@@ -27,7 +27,7 @@ MNIST8M can be downloaded from https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/da
 DEEP100M is to be cut out from DEEP1B. Take first 100M points. https://big-ann-benchmarks.com/
 
 
-Note: For NYTIMES, zero rows must be removed from the base file.
+Note: For MNIST, zero rows must be removed from the base file.
 
 Note: For GIST1M, there were only 1000 queries. Therefore 1000 queries were repeated 10 times to give queries file of 10,000  queries.
 
