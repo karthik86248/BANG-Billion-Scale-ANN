@@ -1,9 +1,9 @@
 # BANG : Billion-Scale Approximate Nearest Neighbor Search using a Single GPU
 
 Efficient Approximate Nearest Neighbour Search using GPU. We have three variants of the implementation :
-* BANG_Base : The graph is stored on the host RAM, PQ compressed vectors on GPU.
-* BANG_Inmemory : The graph and PQ compressed vectors both are store on GPU.
-* BANG_Exactdistance : The graph is stored on GPU. PQ compressed vectors are not used. Distance computations are performed using the base dataset vectors.
+* BANG Base : The graph is stored on the host RAM, PQ compressed vectors on GPU.
+* BANG In-memory : The graph and PQ compressed vectors both are store on GPU.
+* BANG Exact-distance : The graph is stored on GPU. PQ compressed vectors are not used. Distance computations are performed using the base dataset vectors.
 
 Billion scale datasets can be used with Band_Base only.
 
