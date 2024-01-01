@@ -21,24 +21,15 @@
 
 #define R 64 // Max. node degree
 
-//#define BF 40009ULL   // size of bloom-filter (per query) with 40009 -> 400 MB
-// 4 GB worth of BF, // we have 4 GB headroom in GPU ,
-// could be varied for varying recall/QPS in plots (apart from L, L is the typically varied for plots)
 #define BF_ENTRIES  399887U    	 // per query, max entries in BF, (prime number)
 const unsigned BF_MEMORY = (BF_ENTRIES & 0xFFFFFFFC) + sizeof(unsigned); // 4-byte mem aligned size for actual allocation
 
 #define _DBG_BOUNDS
-//#define _DBG_RERANKING
-//#define _DBG_ITERATIONS
-//#define _DBG_BLOOMFILTER // For BF efficiency testing
 int nQueryID = 0;
-//#define FREE_AFTERUSE  // Free memory on CPU adn GPU that are no longer required. Not to be used, if doing multiple runs
-					   	 // This might impact the performance, as free happens parallel with search.
 
 // Indicates MAX iterations performed. IF there is at least one qeuery that requires neighbour seek
 // for a parent, then iteration will occur. There is one initial iteratoion where Medoid is added (outside do-while)
 #define MAX_PARENTS_PERQUERY (L + 50) // Needs to be set with expereince. set it to (2*L) if in doubt
-//#define MAX_PARENTS_PERQUERY (20)
 
 // length of each entry in INDEX file 128 bytes (FP) + 4 bytes (degree) + 256 bytes (AdjList for R=64)
 // There are N such entries
@@ -51,7 +42,6 @@ int nQueryID = 0;
 using namespace std;
 using Clock = std::chrono::high_resolution_clock;
 
-//texture<uint8_t, 1, cudaReadModeElementType> tex_compressedVectors; // for 1D texture memory
 const unsigned long long ullIndex_Entry_LEN = INDEX_ENTRY_LEN;
 
 off_t caclulate_filesize(const char* chFileName)
@@ -74,33 +64,6 @@ off_t caclulate_filesize(const char* chFileName)
 	return file_size;
 }
 
-void* mmap_bin(const char* chFileName)
-{
-	int fd = -1;
-	uint8_t* pMemMap =  NULL;
-
-	off_t file_size = caclulate_filesize(chFileName);
-	if ((fd = open(chFileName, O_RDONLY , (mode_t)0 )) == -1)
-	{
-		perror("Error opening file for writing");
-		exit(EXIT_FAILURE);
-	}
-
-	pMemMap = reinterpret_cast<uint8_t*>(mmap(0, file_size, PROT_READ,MAP_PRIVATE, fd, 0));
-	if((pMemMap) == MAP_FAILED)
-	// See if MAP_SHARED is the right thing in terms of performance
-	{
-		close(fd);
-		perror("Error mmapping the file");
-		exit(EXIT_FAILURE);
-	}
-
-	printf("MMAP'ed at addr = %p\t", pMemMap);
-
-	cout << "filename = " << chFileName <<  " filesize = " << file_size <<  " bytes" << endl;
-	close(fd);
-	return (void*)pMemMap;
-}
 
 unsigned long long log_message (const char* message)
 {
@@ -116,7 +79,6 @@ unsigned long long log_message (const char* message)
 
 
 void parANN(int argc, char** argv) {
-	// the eight i/p files (7 bin + 1 txt)
 	string pqTable_file = string(argv[1]); // Pivot files
 	string compressedVector_file = string(argv[2]);
 	string graphAdjListAndFP_file = string(argv[3]);
@@ -149,17 +111,6 @@ void parANN(int argc, char** argv) {
 	cout << medoidID << "\t" << numQueries << endl;
 
 	printf("BF Memory = %u BF_ENTRIES = %u\n",BF_MEMORY, BF_ENTRIES);
-	/* Input files needed and their format
-	1) pqTable_file  (binary)
-	2) compressedVector_file (binary)
-	3) graphAdjList_file (binary) // DiskANN generated graph (.index file) converted to .bin format), using index_to_binary_graph.py
-	                              // The .bin format is : FP vector, Degre, NeighborList
-	                              //
-	4) queryPointsFP_file (binary)
-	5) chunkOffsets_file (binary)
-	6) centroid_file (binary)
-	7) truthset_bin (binary)
-	*/
 
 	// Check if files exist
 	ifstream in1(pqTable_file, std::ios::binary);
@@ -255,8 +206,6 @@ void parANN(int argc, char** argv) {
 	// Print the first and last neighbour in AdjList
 	printf("%u \t %u\n", *puNeighbour, *puNeighbour1);
 
-
-
 	datatype_t* queriesFP = NULL;
 
 	queriesFP = (datatype_t*) malloc(sizeof(datatype_t)* numQueries * D);	// full floating point coordinates of queries
@@ -271,14 +220,11 @@ void parANN(int argc, char** argv) {
 	in4.read((char*)queriesFP,sizeof(datatype_t)*D*numQueries);
 	in4.close();
 
-
 	// Loading chunk offsets
-
 	unsigned n_chunks = CHUNKS;
 	unsigned *chunksOffset = (unsigned*) malloc(sizeof(unsigned) * (n_chunks+1));
 	uint64_t numr = n_chunks + 1;
 	uint64_t numc = 1;
-
 	load_bin<uint32_t>(chunkOffsets_file, chunksOffset, numr, numc);	//Import the chunkoffset file
 
 
@@ -340,11 +286,8 @@ void parANN(int argc, char** argv) {
 	unsigned *d_mark = NULL;
 
 	unsigned  *d_chunksOffset = NULL;
-	//uint8_t * d_compressedVectors = NULL;
 	bool *d_BestLSets_visited = NULL;
-	//bool *d_merged_visited = NULL;
 	bool *d_nextIter = NULL;
-	// ToDo : Check if we can avoid work at bool granularity and at bit level
 	bool *d_processed_bit_vec = NULL;
 	unsigned* d_numQueries = NULL;
 	// 2D array format
@@ -358,7 +301,6 @@ void parANN(int argc, char** argv) {
 	datatype_t* d_FPSetCoordsList = NULL; // M x N
 	// Indicates how many entries are present per query
 
-	// ToDo: Datatype can be reduced from Unsigned to uint8
 	unsigned* d_FPSetCoordsList_Counts = NULL; // Size is N
 	float* d_L2distances = NULL; // M x N dimensions
 	unsigned* d_L2ParentIds = NULL; // // M x N dimensions
@@ -398,11 +340,8 @@ void parANN(int argc, char** argv) {
 	vector<vector<unsigned>> final_bestL1;	// Per query vector to store the visited parent and its distance to query point
 	final_bestL1.resize(numQueries);
 	unsigned offset =  (R+1);
-	// Experimentation with using Shared Meory for PQDist tables (no latency improvement observed)
-	// gpuErrchk(cudaFuncSetAttribute(compute_neighborDist_par, cudaFuncAttributeMaxDynamicSharedMemorySize, CHUNKS * 256 *sizeof(float)));
 
 	// Allocations on GPU
-	//gpuErrchk(cudaMalloc(&d_compressedVectors, sizeof(uint8_t) * N * CHUNKS)); 	//100M*100 ~10GB
 	gpuErrchk(cudaMalloc(&d_processed_bit_vec, sizeof(bool)*BF_MEMORY*numQueries));
 	gpuErrchk(cudaMalloc(&d_nextIter, sizeof(bool)));
 	gpuErrchk(cudaMalloc(&d_iter, sizeof(unsigned)));
@@ -414,7 +353,6 @@ void parANN(int argc, char** argv) {
 	gpuErrchk(cudaMalloc(&d_mergedNodes, sizeof(unsigned) * (2*L)));
 	gpuErrchk(cudaMalloc(&d_BestLSets, sizeof(unsigned) * (numQueries* (L))));
 	gpuErrchk(cudaMalloc(&d_BestLSets_visited, sizeof(bool) * (numQueries* (L))));
-	//gpuErrchk(cudaMalloc(&d_merged_visited, sizeof(bool) * (numQueries* (2*L))));
 	gpuErrchk(cudaMalloc(&d_BestLSetsDist, sizeof(float) * (numQueries*(L))));
 	gpuErrchk(cudaMalloc(&d_neighbors_aux, sizeof(unsigned) * (numQueries*(R+1))));
 	gpuErrchk(cudaMalloc(&d_numNeighbors_query, sizeof(unsigned) * (numQueries)));
@@ -470,12 +408,10 @@ void parANN(int argc, char** argv) {
 
 	// host to device transfer
 	gpuErrchk(cudaMemcpy(d_pqTable, pqTable_T, sizeof(float) * (256*D), cudaMemcpyHostToDevice));
-	//gpuErrchk(cudaMemcpy(d_compressedVectors, compressedVectors, (unsigned long long)(sizeof(uint8_t) * (unsigned long long)(CHUNKS)*N),cudaMemcpyHostToDevice));
 	gpuErrchk(cudaMemcpy(d_chunksOffset, chunksOffset, sizeof(unsigned) * (n_chunks+1), cudaMemcpyHostToDevice));
 
 	// There are 3 stages for free'ing: 1) After transferring to Device (i.e. before search) 2) After the iterations and 3) Before termination
 #ifdef FREE_AFTERUSE
-	// ToDo : To reduce CPU peak memory, the compressed vectors cna be transferred to GPU first and free'd. Then load the graph on CPU
 	free(pqTable_T);
 	pqTable_T = NULL;
 	free(chunksOffset);
@@ -509,7 +445,6 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	free(FPSetCoordsList_Counts);
 	FPSetCoordsList_Counts = NULL;
 #endif
-//	 start = std::chrono::high_resolution_clock::now();
 	// [1] collecting all medoid's neighbors for better locality
 	puNumNeighbours = (unsigned*)( pIndex + ((ullIndex_Entry_LEN * medoidID) + (D*sizeof(datatype_t))) );
 	unsigned medoidDegree = *puNumNeighbours;
@@ -533,7 +468,6 @@ do // this is just to run the entire search multiple runs for consistent stats r
 
 		numNeighbors_query[ii] = numNeighbors;
 		// Copy the medoid's FP vectorsi Async (row 0) iter = 1 here.
-		// ToDo: Try to remove the two stage copy and call cudaMemcpyAsync directly here
 		memcpy(FPSetCoordsList + ((iter-1) * FPSetCoords_rowsize) + (ii*FPSetCoords_size),
 				pIndex + (ullIndex_Entry_LEN * medoidID) ,
 				FPSetCoords_size_bytes);
@@ -543,15 +477,9 @@ do // this is just to run the entire search multiple runs for consistent stats r
 					FPSetCoordsList + ((iter-1)* FPSetCoords_rowsize),
 					FPSetCoords_rowsize_bytes,cudaMemcpyHostToDevice,streamFPTransfers);
 
-//	stop = std::chrono::high_resolution_clock::now();
-//	seek_neighbours_time += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000;
-
-//	gputimer.Start();
 	//Transfer neighbor IDs and count to GPU
 	gpuErrchk(cudaMemcpy(d_neighbors_temp, neighbors, sizeof(unsigned) * numQueries*(R+1), cudaMemcpyHostToDevice));
 	gpuErrchk(cudaMemcpy(d_numNeighbors_query_temp, numNeighbors_query, sizeof(unsigned) * (numQueries), cudaMemcpyHostToDevice));
-//	gputimer.Stop();
-//	time_transfer += gputimer.Elapsed();
 
 	// Cache Warm-up
 	if (bCacheWarmUp)
@@ -599,7 +527,6 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	/** [4] Launching the kernel with "numQueries" number of thread-blocks and block size of 256
 	 * One thread block is assigned to a query, i.e., 256 threads perform the computation for a query. The block size has been tuned for performance.
 	 */
-	 // ToDo: 256 or R
 		#ifdef _DBG_BLOOMFILTER
 		if (nQueryID == 0)
 		{
@@ -641,12 +568,9 @@ do // this is just to run the entire search multiple runs for consistent stats r
 
 	gputimer.Start();
 
-	//gpuErrchk(cudaMemset(d_neighborsDist_query,0,sizeof(float) * (numQueries*(R+1) )));
 	/** [5] Launching the kernel with "numQueries" number of thread-blocks and user specified "numThreads_K2" block size.
 	 * One thread block is assigned to a query, i.e., "numThreads_K2" threads perform the computation for a query.
 	 */
-	/*compute_neighborDist_par <<<numQueries, numThreads_K2,CHUNKS * 256  *sizeof(float), streamKernels >>> (d_neighbors, d_numNeighbors_query, d_compressedVectors,
-	d_pqDistTables, d_neighborsDist_query);*/
 
 	compute_neighborDist_par <<<numQueries, numThreads_K2,0, streamKernels >>> (d_neighbors, d_numNeighbors_query, d_compressedVectors,
 	d_pqDistTables, d_neighborsDist_query);
@@ -663,17 +587,8 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	compute_parent1<<<(numQueries + numThreads_K4 -1 )/numThreads_K4,numThreads_K4,0, streamKernels >>>(d_neighbors, d_numNeighbors_query, d_neighborsDist_query,
 			d_BestLSets, d_BestLSetsDist, d_BestLSets_visited, d_parents, d_nextIter, d_BestLSets_count, d_mark,
 			d_iter,d_L2ParentIds,d_FPSetCoordsList_Counts, d_numQueries);
-	// [7] Compute distance of MEDOID to Query Points
 	gputimer.Stop();
 	time_B1_vec.push_back(gputimer.Elapsed());
-#ifdef _DBG1
-	ofstream fileParents;
-	fileParents.open("./parents.bin", ios::binary|ios::out);
-#endif
-
-
-
-
 
 	// Loop until all the query have no new parent
 	do
@@ -733,9 +648,7 @@ do // this is just to run the entire search multiple runs for consistent stats r
 		start = std::chrono::high_resolution_clock::now();
 		#pragma omp parallel
 		{
-			// NOTE: USE STACK VARIABLES TO AVOID CONCURRENCY ISSUES
 			int CPUthreadno =  omp_get_thread_num();
-			//#pragma omp for
 			/*Collecting the node ids of neighborhood of the parent nodes to send to GPU */
 			// Note: Only one parent is supported per query. Becasue offset_neighbors is function of
 			// queryID only. To support multiple parents in a query, it should have been dependent on
@@ -762,7 +675,6 @@ do // this is just to run the entire search multiple runs for consistent stats r
 					unsigned offset_neighbors = ii * offset;
 
 					// Copy the Parent's'FP vectors of current query
-					// ToDo: Try to remove the two stage copy and call cudaMemcpyAsync directly here
 					memcpy(FPSetCoordsList + (iter * FPSetCoords_rowsize) + (ii*FPSetCoords_size),
 							pIndex + (ullIndex_Entry_LEN * curreParent),
 							FPSetCoords_size_bytes);
@@ -879,10 +791,6 @@ do // this is just to run the entire search multiple runs for consistent stats r
 		/** [12]vLaunching the kernel with "numQueries" number of thread-blocks and user specified "numThreads_K2" block size.
 		 * One thread block is assigned to a query, i.e., "numThreads_K2" threads perform the computation for a query.
 		 */
-		/*compute_neighborDist_par <<<numQueries, numThreads_K2,CHUNKS * 256  *sizeof(float),streamKernels >>> (d_neighbors, d_numNeighbors_query, d_compressedVectors,
-		d_pqDistTables, d_neighborsDist_query);*/
-
-
 
 		compute_neighborDist_par <<<numQueries, numThreads_K2,0,streamKernels >>> (d_neighbors, d_numNeighbors_query, d_compressedVectors,
 		d_pqDistTables, d_neighborsDist_query);
@@ -908,8 +816,6 @@ do // this is just to run the entire search multiple runs for consistent stats r
 		// Hence, the above call could act as a synchronization mechanism to ensure all kernels are done (next parent ready)
 		// before we start seeking neighbours on CPU
 
-	  	//  printf("Iteration = %d\n", iter);
-
 		stop = std::chrono::high_resolution_clock::now();
 		time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
 
@@ -934,7 +840,6 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	// This can negatively impact search performance
 	// GPU
 	gpuErrchk(cudaFree(d_compressedVectors));
-	// ToDo : More data structs can be free'd
 	gpuErrchk(cudaFree(d_chunksOffset));
 	gpuErrchk(cudaFree(d_pqTable));
 	gpuErrchk(cudaFree(d_pqDistTables));
@@ -975,15 +880,10 @@ do // this is just to run the entire search multiple runs for consistent stats r
 #endif // #if FREE_AFTERUSE
 
 
-	//	gputimer.Stop();
-	//	time_transfer += gputimer.Elapsed();
-
 	// re-rnking start
-#if 1
 	gputimer.Start();
 
 	cudaStreamSynchronize(streamFPTransfers);
-	// ToDo: Instead of K4_blockSize, MAX_PARENTS_PERQUERY can be used
 	compute_L2Dist<<<numQueries, K4_blockSize >>> (d_FPSetCoordsList,
 												d_FPSetCoordsList_Counts,
 												d_queriesFP,
@@ -1094,7 +994,7 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
 
 	// re-rnking end
-#endif
+
 
 	// Copy the BestLSets to CPU
 	unsigned* BestLSets = (unsigned*)malloc(sizeof(unsigned) * (L * numQueries));
@@ -1115,13 +1015,11 @@ do // this is just to run the entire search multiple runs for consistent stats r
 			{
 				query_best.push_back(nearestNeighbours[ ( numQueries * jj) + ii]);
 				// use best L-Set instead directly for ANNs instead of re-ranking
-				//query_best.push_back(BestLSets[ (L * ii) + jj]);
 			}
 
 			#pragma omp critical
 			{
 				final_bestL1[ii] = query_best;
-//				printf("final_bestL1[%d] size = %lu \n", ii, final_bestL1[ii].size());
 			}
 		}
 	}
@@ -1137,7 +1035,7 @@ do // this is just to run the entire search multiple runs for consistent stats r
 
 	gpuErrchk(cudaFree(d_queriesFP));
 	gpuErrchk(cudaFree(d_FPSetCoordsList));
-	gpuErrchk(cudaFree(d_FPSetCoordsList_Counts));// ToDo used for calculating total parents down
+	gpuErrchk(cudaFree(d_FPSetCoordsList_Counts));
 	gpuErrchk(cudaFree(d_L2distances));
 	gpuErrchk(cudaFree(d_L2ParentIds));
 	gpuErrchk(cudaFree(d_nearestNeighbours));
@@ -1432,7 +1330,6 @@ __global__ void  compute_neighborDist_par(unsigned* d_neighbors,
 		d_neighborsDist_query_start[uIter] = 0;
 
 	typedef cub::WarpReduce<float,THREADS_PER_NEIGHBOR> WarpReduce;
-	//typedef cub::WarpReduce<float> WarpReduce;
 	__shared__ typename WarpReduce::TempStorage temp_storage[R];
 
 	for( unsigned j = tid/THREADS_PER_NEIGHBOR; j < numNeighbors; j += (blockDim.x)/THREADS_PER_NEIGHBOR ) { // assign eight threads to a neighbor, within a query
@@ -1445,7 +1342,6 @@ __global__ void  compute_neighborDist_par(unsigned* d_neighbors,
 			sum += d_pqDistTables_start[(i * 256) + d_compressedVectors_start[i]];
 		}
 
-		//atomicAdd(&d_neighborsDist_query_start[j], sum);
 		d_neighborsDist_query_start[j] = WarpReduce(temp_storage[j]).Sum(sum);
 	}
 }
@@ -1458,14 +1354,13 @@ __global__ void compute_L2Dist (datatype_t* d_FPSetCoordsList,
 								unsigned* d_numQueries)
 {
 
-	__shared__ datatype_t query_vec[D]; //ToDo can be kept in constant/texture memory
+	__shared__ datatype_t query_vec[D];
 	//datatype_t query_vec[D];
 	unsigned queryID = blockIdx.x;
 	unsigned numNodes = d_FPSetCoordsList_Counts[queryID];
 	unsigned tid = threadIdx.x;
 	unsigned gid = queryID * D;
 	unsigned numQueries = *d_numQueries;
-	// ToDo : see if this can be made global
 	const unsigned long long FPSetCoords_size = D; // * sizeof(datatype_t) Note : To be used for array indexing, hence not byte offsets
 	const unsigned long long FPSetCoords_rowsize = FPSetCoords_size * numQueries;
 
@@ -1579,26 +1474,24 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 
 	unsigned parentIndex = 0;
 
-//	if(Best_L_Set_size==0){
 		parentIndex++;
 		d_parents[queryID*(SIZEPARENTLIST)+parentIndex] = d_neighbors[index];
 		d_mark[queryID]= d_neighbors[index];
 		// Lets mark this nodeID for re-ranking later
 		//d_basepoints_parentqueries[d_neighbors[index]] = queryID;
-//	}
+
 
 	// Place the parent in d_parents array if parent is decided and set the next iteration flag to true
 	// indicates the numParents used in neighbours seeking step
 	d_parents[queryID*(SIZEPARENTLIST)] = parentIndex;
 	// Note: parentIndex should ideally be accessed in a synchronized manner.
 	// (but only WRITEs (no READs) are there now,   so its ok)
-//	if(parentIndex != 0) // parentIndex == 0 is the termination condition for the algorithm.
-	{
-		*d_nextIter = true;
-		// Note: One thread assigned to one Query, so ok to increment (no contention)
-		d_FPSetCoordsList_Counts[queryID]++;
-		d_L2ParentIds[( (*d_iter) * numQueries) + queryID] = d_parents[queryID*(SIZEPARENTLIST)+parentIndex];
-	}
+
+	*d_nextIter = true;
+	// Note: One thread assigned to one Query, so ok to increment (no contention)
+	d_FPSetCoordsList_Counts[queryID]++;
+	d_L2ParentIds[( (*d_iter) * numQueries) + queryID] = d_parents[queryID*(SIZEPARENTLIST)+parentIndex];
+
 
 }
 /** This kernel populates the list of nodes whose neighborhood information has to be fetched in the next iteration, from Best_L_Set or neighbors' list for every query
@@ -1971,86 +1864,3 @@ __device__ unsigned upper_bound_d_ex(float arr[], unsigned lo, unsigned hi, floa
 	return lo;
 }
 
-
-
-void SetupBFS(NodeIDMap& p_mapNodeIDToNode)
-{
-
-}
-
-void ExitBFS(NodeIDMap& p_mapNodeIDToNode)
-{
-	NodeIDMap::iterator it;
-
-	for(it=p_mapNodeIDToNode.begin(); it!=p_mapNodeIDToNode.end(); ++it)
-	{
-		free(it->second);
-	}
-}
-
-
-// for 100000 Nodes, 1.2 MB memory allocated
-NeighbourList GetNeighbours(uint8_t* pGraph,
-							unsigned curreParent,
-							NodeIDMap& mapNodeIDToNode)
-{
-	NeighbourList retList;
-	// find the children nodes and its degree
-	unsigned long long temp = (ullIndex_Entry_LEN * curreParent) + (D*sizeof(datatype_t));
-	unsigned *puNumNeighbours = (unsigned*)(pGraph + temp );
-
-	for(unsigned kk = 0; kk < *puNumNeighbours; ++kk)
-	{
-		Node* pNode = (Node*)malloc(sizeof(Node));
-		pNode->uNodeID = *(puNumNeighbours+1+kk);
-		pNode->bVisited = false;
-		//pNode->nLevel = -1;
-		retList.push_back(pNode->uNodeID);
-		mapNodeIDToNode[pNode->uNodeID] = pNode;
-	}
-
-	return retList;
-}
-
-void bfs(unsigned uMedoid,
-		const unsigned nNodesToDiscover,
-		unsigned& visit_counter,
-		NodeIDMap& mapNodeIDToNode,
-		uint8_t* pGraph)
-{
-	Node* pNode = (Node*)malloc(sizeof(Node));
-	pNode->uNodeID = uMedoid;
-	pNode->bVisited = true;
-	//pNode->nLevel = 0;
-	mapNodeIDToNode[pNode->uNodeID] = pNode;
-	visit_counter++;
-	list<unsigned> queue;
-	queue.push_back(uMedoid);
-
-	while (!queue.empty())
-	{
-		bool bRet = false;
-		unsigned currentVertex = queue.front();
-		queue.pop_front();
-		//printf("Visited %d\n", currentVertex);
-		NeighbourList listChildres = GetNeighbours(pGraph, currentVertex, mapNodeIDToNode);
-
-		for (int nIter = 0; nIter < listChildres.size(); nIter++)
-		{
-			if (mapNodeIDToNode[listChildres[nIter]]->bVisited == true)
-				continue;
-			mapNodeIDToNode[listChildres[nIter]]->bVisited = true;
-			visit_counter++;
-			queue.push_back(listChildres[nIter]);
-
-			if (visit_counter == nNodesToDiscover)
-			{
-				cout << "warm up done : Visited counter:" << visit_counter << endl;
-				bRet = true;
-				break;
-			}
-		}
-		if (bRet)
-			break;
-	}
-}

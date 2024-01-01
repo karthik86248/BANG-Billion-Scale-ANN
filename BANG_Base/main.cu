@@ -33,9 +33,6 @@ int main(int argc, char** argv) {
 
 
 
-
-
-
 /*Helper function*/
 void cached_ifstream :: open(const std::string& filename, uint64_t cacheSize) {
 	this->cur_off = 0;

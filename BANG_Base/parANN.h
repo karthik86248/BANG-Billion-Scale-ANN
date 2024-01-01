@@ -18,7 +18,7 @@
 using std::string;
 
 /*
-For Plotting results for dataset
+For Plotting results for dataset used in the paper
 
 1) Fix the L and BF size for the "right-most point" (point with lowest QPS and highest recall).
 BF size is calculated based on how much memory is remaining on GPU
@@ -26,7 +26,6 @@ BF size is calculated based on how much memory is remaining on GPU
 2) Then start varying the L to generates points towards left and north on the plot
 
 3) define the dataset-specific #define like done below for each dataset below.
-ToDo: L will be made as an interactive parameter to avoid re-compilations
 
 4) Discard the first run results as it will be higher (outlier). Take the next 5 runs and
 compute the geomean.
