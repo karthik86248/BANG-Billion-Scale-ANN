@@ -12,7 +12,7 @@ The source code for each variant is present in the resepctive folders.
 ## Prerequisities
 * Sufficient Host RAM to store the graph per the dataset
 * NVIDIA A100 80GB GPU card
-* CUDA version >= 12.0
+* CUDA version >= 11.8
 * gcc and g++ 11.0 or higher (C++11 support)
 * Boost library
 * DiskANN (follow the instruction in https://github.com/microsoft/DiskANN)
