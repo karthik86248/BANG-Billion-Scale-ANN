@@ -60,7 +60,8 @@ e.g../build_disk_index --data_type uint8 --dist_fn l2 --data_path /mnt/hdd_volum
 An example is shown below:
 
 ```
-./bang /mnt/ssd_volume/diskANN-working/build/tests/sift1b_index_pq_pivots.bin  /mnt/ssd_volume/diskANN-working/build/tests/sift1b_index_pq_compressed.bin /mnt/ssd_volume/diskANN-working/build/tests/sift1b_index_disk.bin  /mnt/hdd_volume2/sift1b/sift1b_query.bin /mnt/ssd_volume/diskANN-working/build/tests/sift1b_index_pq_pivots.bin_chunk_offsets.bin /mnt/ssd_volume/diskANN-working/build/tests/sift1b_index_pq_pivots.bin_centroid.bin  /mnt/hdd_volume2/sift1b/sift1b_groundtruth.bin 10000 1 256 512 256 10 64 1```
+./bang sift1b_index_pq_pivots.bin  sift1b_index_pq_compressed.bin sift1b_index_disk.bin  sift1b_query.bin sift1b_index_pq_pivots.bin_chunk_offsets.bin sift1b_index_pq_pivots.bin_centroid.bin  sift1b_groundtruth.bin 10000 1 256 512 256 10 64 1
+```
 
 
 
