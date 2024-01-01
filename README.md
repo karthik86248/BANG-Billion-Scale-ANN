@@ -2,10 +2,10 @@
 
 Efficient Approximate Nearest Neighbour Search using GPU. We have three variants of the implementation :
 * BANG Base : The graph is stored on the host RAM, PQ compressed vectors on GPU.
-* BANG In-memory : The graph and PQ compressed vectors both are stored on GPU.
+* BANG In-memory : The graph and PQ compressed vectors, both are stored on GPU.
 * BANG Exact-distance : The graph is stored on GPU. PQ compressed vectors are not used. Distance computations are performed using the base dataset vectors.
 
-Billion scale datasets can be used with Band_Base only.
+Billion scale datasets can be used with Bang Base only.
 
 The source code for each variant is present in the resepctive folders.
 
@@ -67,6 +67,6 @@ An example is shown below:
 
 
 ## Cost Analysis
-A note on the cost analysis (CapEx+Opex) is uploaded to the 
+A note on the cost analysis (CapEx+Opex) is uploaded to the root directory.
 
 
