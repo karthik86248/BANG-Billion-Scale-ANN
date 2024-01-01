@@ -40,7 +40,7 @@ make
 
 ## Graph Generation
 * Download the base dataset from the respective dataset repository. The base dataset, query vectors and the groundtruth files.
-* Generate the graph using the build_disk_index utility.
+* Generate the graph using the *build_disk_index* utility.
 
 ```
 e.g../build_disk_index --data_type uint8 --dist_fn l2 --data_path /mnt/hdd_volume/datasets/sift1b/bigann_base.bin --index_path_prefix sift1b_index -R 64 -L 200 -B 70 -M 48
