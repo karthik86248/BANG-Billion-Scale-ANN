@@ -1,13 +1,20 @@
-# ANN-GPU
-Efficient Approximate Nearest Neighbour Search using GPUs
+# BANG : Billion-Scale Approximate Nearest Neighbor Search using a Single GPU
 
+Efficient Approximate Nearest Neighbour Search using GPU. We have three variants of the implementation :
+* BANG_Base : The graph is stored on the host RAM, PQ compressed vectors on GPU.
+* BANG_Inmemory : The graph and PQ compressed vectors both are store on GPU.
+* BANG_Exactdistance : The graph is stored on GPU. PQ compressed vectors are not used. Distance computations are performed using the base dataset vectors.
 
-This is a standalone GPU parallel implementation of *index_search* from DiskANN.
+Billion scale datasets can be used with Band_Base only.
+
+The source code for each variant is present in the resepctive folders.
 
 ## Prerequisities
-* CUDA version >= 12.0
+* Sufficient Host RAM to store the graph per the dataset (Highest being 640 GB for DEEP1B)
+* NVIDIA A100 80GB GPU card
+* CUDA version >= 11.8
 * gcc and g++ 11.0 or higher (C++11 support)
-* Boost library
+* Boost C++ libraries (https://www.boost.org/) version >=1.74
 * DiskANN (follow the instruction in https://github.com/microsoft/DiskANN)
 
 ## Code Build
