@@ -17,6 +17,16 @@ The source code for each variant is present in the resepctive folders.
 * Boost C++ libraries (https://www.boost.org/) version >=1.74
 * DiskANN (follow the instruction in https://github.com/microsoft/DiskANN)
 
+## Dataset repositories
+SIFT and GIST datasets can be downloaded from http://corpus-texmex.irisa.fr/
+GLOVE200 and NYTIMES can be downloaded from https://github.com/erikbern/ann-benchmarks/blob/master/README.md
+MNIST8M can be downloaded from https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/multiclass.html#mnist8m
+DEEP100M is to be cut out from DEEP1B. Take first 100M points. https://big-ann-benchmarks.com/
+
+
+Note: For NYTIMES, zero rows must be removed from the base file.
+Note: For GIST1M, there were only 1000 queries. Therefore 1000 queries were repeated 10 times to give queries file of 10,000  queries.
+
 ## Code Build
 
 Run Makefile to build the code.
