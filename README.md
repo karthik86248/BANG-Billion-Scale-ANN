@@ -1,9 +1,9 @@
 # BANG : Billion-Scale Approximate Nearest Neighbor Search using a Single GPU
 
 Efficient Approximate Nearest Neighbour Search using GPU. We have three variants of the implementation :
-* BANG_Base : The graph is stored on the host RAM, PQ compressed vectors on GPU.
-* BANG_Inmemory : The graph and PQ compressed vectors both are store on GPU.
-* BANG_Exactdistance : The graph is stored on GPU. PQ compressed vectors are not used. Distance computations are performed using the base dataset vectors.
+* BANG Base : The graph is stored on the host RAM, PQ compressed vectors on GPU.
+* BANG In-memory : The graph and PQ compressed vectors both are store on GPU.
+* BANG Exact-distance : The graph is stored on GPU. PQ compressed vectors are not used. Distance computations are performed using the base dataset vectors.
 
 Billion scale datasets can be used with Band_Base only.
 
@@ -16,6 +16,20 @@ The source code for each variant is present in the resepctive folders.
 * gcc and g++ 11.0 or higher (C++11 support)
 * Boost C++ libraries (https://www.boost.org/) version >=1.74
 * DiskANN (follow the instruction in https://github.com/microsoft/DiskANN)
+
+## Dataset repositories
+SIFT and GIST datasets can be downloaded from http://corpus-texmex.irisa.fr/
+
+GLOVE200 and NYTIMES can be downloaded from https://github.com/erikbern/ann-benchmarks/blob/master/README.md
+
+MNIST8M can be downloaded from https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/multiclass.html#mnist8m
+
+DEEP100M is to be cut out from DEEP1B. Take first 100M points. https://big-ann-benchmarks.com/
+
+
+Note: For MNIST, zero rows must be removed from the base file.
+
+Note: For GIST1M, there were only 1000 queries. Therefore 1000 queries were repeated 10 times to give queries file of 10,000  queries.
 
 ## Code Build
 
@@ -46,7 +60,8 @@ e.g../build_disk_index --data_type uint8 --dist_fn l2 --data_path /mnt/hdd_volum
 An example is shown below:
 
 ```
-./bang /mnt/ssd_volume/diskANN-working/build/tests/sift1b_index_pq_pivots.bin  /mnt/ssd_volume/diskANN-working/build/tests/sift1b_index_pq_compressed.bin /mnt/ssd_volume/diskANN-working/build/tests/sift1b_index_disk.bin  /mnt/hdd_volume2/sift1b/sift1b_query.bin /mnt/ssd_volume/diskANN-working/build/tests/sift1b_index_pq_pivots.bin_chunk_offsets.bin /mnt/ssd_volume/diskANN-working/build/tests/sift1b_index_pq_pivots.bin_centroid.bin  /mnt/hdd_volume2/sift1b/sift1b_groundtruth.bin 10000 1 256 512 256 10 64 1```
+./bang sift1b_index_pq_pivots.bin  sift1b_index_pq_compressed.bin sift1b_index_disk.bin  sift1b_query.bin sift1b_index_pq_pivots.bin_chunk_offsets.bin sift1b_index_pq_pivots.bin_centroid.bin  sift1b_groundtruth.bin 10000 1 256 512 256 10 64 1
+```
 
 
 
