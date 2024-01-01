@@ -5,7 +5,7 @@ Efficient Approximate Nearest Neighbour Search using GPU. We have three variants
 * BANG In-memory : The graph and PQ compressed vectors, both are stored on GPU.
 * BANG Exact-distance : The graph is stored on GPU. PQ compressed vectors are not used. Distance computations are performed using the base dataset vectors.
 
-Billion scale datasets can be used with Bang Base only.
+Billion scale datasets can be used with BANG Base only.
 
 The source code for each variant is present in the respective folders.
 
@@ -15,7 +15,7 @@ The source code for each variant is present in the respective folders.
 * CUDA version >= 11.8
 * gcc and g++ 11.0 or higher (C++11 support)
 * Boost C++ libraries (https://www.boost.org/) version >=1.74
-* DiskANN (follow the instruction in https://github.com/microsoft/DiskANN)
+* DiskANN (follow the instructions provided in https://github.com/microsoft/DiskANN)
 
 ## Dataset repositories
 SIFT and GIST datasets can be downloaded from http://corpus-texmex.irisa.fr/
