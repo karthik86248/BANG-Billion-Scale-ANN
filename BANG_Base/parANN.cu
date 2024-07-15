@@ -1864,3 +1864,84 @@ __device__ unsigned upper_bound_d_ex(float arr[], unsigned lo, unsigned hi, floa
 	return lo;
 }
 
+void SetupBFS(NodeIDMap& p_mapNodeIDToNode)
+{
+
+}
+
+void ExitBFS(NodeIDMap& p_mapNodeIDToNode)
+{
+	NodeIDMap::iterator it;
+
+	for(it=p_mapNodeIDToNode.begin(); it!=p_mapNodeIDToNode.end(); ++it)
+	{
+		free(it->second);
+	}
+}
+
+
+// for 100000 Nodes, 1.2 MB memory allocated
+NeighbourList GetNeighbours(uint8_t* pGraph,
+							unsigned curreParent,
+							NodeIDMap& mapNodeIDToNode)
+{
+	NeighbourList retList;
+	// find the children nodes and its degree
+	unsigned long long temp = (ullIndex_Entry_LEN * curreParent) + (D*sizeof(datatype_t));
+	unsigned *puNumNeighbours = (unsigned*)(pGraph + temp );
+
+	for(unsigned kk = 0; kk < *puNumNeighbours; ++kk)
+	{
+		Node* pNode = (Node*)malloc(sizeof(Node));
+		pNode->uNodeID = *(puNumNeighbours+1+kk);
+		pNode->bVisited = false;
+		//pNode->nLevel = -1;
+		retList.push_back(pNode->uNodeID);
+		mapNodeIDToNode[pNode->uNodeID] = pNode;
+	}
+
+	return retList;
+}
+
+void bfs(unsigned uMedoid,
+		const unsigned nNodesToDiscover,
+		unsigned& visit_counter,
+		NodeIDMap& mapNodeIDToNode,
+		uint8_t* pGraph)
+{
+	Node* pNode = (Node*)malloc(sizeof(Node));
+	pNode->uNodeID = uMedoid;
+	pNode->bVisited = true;
+	//pNode->nLevel = 0;
+	mapNodeIDToNode[pNode->uNodeID] = pNode;
+	visit_counter++;
+	list<unsigned> queue;
+	queue.push_back(uMedoid);
+
+	while (!queue.empty())
+	{
+		bool bRet = false;
+		unsigned currentVertex = queue.front();
+		queue.pop_front();
+		//printf("Visited %d\n", currentVertex);
+		NeighbourList listChildres = GetNeighbours(pGraph, currentVertex, mapNodeIDToNode);
+
+		for (int nIter = 0; nIter < listChildres.size(); nIter++)
+		{
+			if (mapNodeIDToNode[listChildres[nIter]]->bVisited == true)
+				continue;
+			mapNodeIDToNode[listChildres[nIter]]->bVisited = true;
+			visit_counter++;
+			queue.push_back(listChildres[nIter]);
+
+			if (visit_counter == nNodesToDiscover)
+			{
+				cout << "warm up done : Visited counter:" << visit_counter << endl;
+				bRet = true;
+				break;
+			}
+		}
+		if (bRet)
+			break;
+	}
+}
