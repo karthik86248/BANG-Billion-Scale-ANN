@@ -1,8 +1,19 @@
+/* Copyright 2024 Indian Institute Of Technology Hyderbad, India. All Rights Reserved.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+// Authors: Karthik V., Saim Khan, Somesh Singh
+//
 #ifndef PARANN_H_
 #define PARANN_H_
 
-#include <cuda_runtime.h>
-#include <cub/cub.cuh>
 #include <cstdio>
 #include <cstdint>
 #include <sys/stat.h>
@@ -17,120 +28,74 @@
 
 using std::string;
 
-/*
-For Plotting results for dataset used in the paper
-
-1) Fix the L and BF size for the "right-most point" (point with lowest QPS and highest recall).
-BF size is calculated based on how much memory is remaining on GPU
-
-2) Then start varying the L to generates points towards left and north on the plot
-
-3) define the dataset-specific #define like done below for each dataset below.
-
-4) Discard the first run results as it will be higher (outlier). Take the next 5 runs and
-compute the geomean.
-
-5) Turn OFF stats break-up using ENABLE_GPU_STATS in commandline
-
-*/
-
-#define SIFT1B
-
-#ifdef SPACEV1BSMALL
-typedef int8_t datatype_t; // go to header file to change the datatype
-#define INDEX_ENTRY_LEN (360)
-#define D 100 // dimensions of the data
-#define L 10 // L_search
-#define CHUNKS 100
-#define MEDOID 4393 //4393
-#define N 10000// total number of nodes in the dataset
-#define NUMTHREADS_COMPUTEPARENT 1  // surprisingly, found 1 to work better than 128!
-#endif
-
-#ifdef SPACEV1B
-typedef int8_t datatype_t; // go to header file to change the datatype
-#define INDEX_ENTRY_LEN (360)
-#define D 100 // dimensions of the data
-#define L 300 // L_search
-#define CHUNKS 74
-#define MEDOID 912360246 // sift 1B
-#define N 1000000000// total number of nodes in the dataset
-#define NUMTHREADS_COMPUTEPARENT 1  // surprisingly, found 1 to work better than 128!
-#endif
-
-#ifdef DEEP1BSMALL
-typedef float datatype_t; // go to header file to change the datatype
-#define INDEX_ENTRY_LEN (644)
-
-#define D 96 // dimensions of the data
-#define L 10 // L_search
-#define CHUNKS 96
-#define MEDOID 978 // sift 1B
-#define N 10000// total number of nodes in the dataset
-#define NUMTHREADS_COMPUTEPARENT 1  // surprisingly, found 1 to work better than 128!
-#endif
-
-#ifdef DEEP1B
-typedef float datatype_t; // go to header file to change the datatype
-#define INDEX_ENTRY_LEN (644)
-
-#define D 96 // dimensions of the data
-#define L 6     // L_search
-#define CHUNKS 74 // # of chunks for SIFT1b
-#define MEDOID 178757270 // sift 1B
-//#define MEDOID 642390445 //0 // sift 1B BFS
-#define N 1000000000// total number of nodes in the dataset
-#define NUMTHREADS_COMPUTEPARENT 1
-#endif
+#define L 152 // L_search
 
 
+typedef enum _DataTypeEnum
+{
+	ENUM_UNSIGNED_INT8 = 0,
+	ENUM_UNSIGNED_INT32,
+	ENUM_FLOAT 
 
-#ifdef SIFT1BTOY
-typedef uint8_t datatype_t; // go to header file to change the datatype
-#define INDEX_ENTRY_LEN (14)
-#define D 2 // dimensions of the data
-#define L 4 // L_search
-#define CHUNKS 1
-#define MEDOID 6 // sift 1B
-#define N 14// total number of nodes in the dataset
-#define NUMTHREADS_COMPUTEPARENT 1  // surprisingly, found 1 to work better than 128!
-#endif
-
-#ifdef SIFT1BSMALL
-typedef uint8_t datatype_t; // go to header file to change the datatype
-#define INDEX_ENTRY_LEN (260)  //(388) degree is 32
-
-#define D 128 // dimensions of the data
-#define L 10 // L_search
-#define CHUNKS 128
-#define MEDOID 7961 // sift 1B
-#define N 10000// total number of nodes in the dataset
-#define NUMTHREADS_COMPUTEPARENT 1  // surprisingly, found 1 to work better than 128!
-#endif
+} DataTypeEnum;
 
 
-#ifdef SIFT1B
-typedef uint8_t datatype_t; // go to header file to change the datatype
-#define INDEX_ENTRY_LEN (388)
-
-#define D 128 	// dimensions of the data
-#define L 152  // L_search (FIXED)
-
-#define CHUNKS 64 // # of chunks for SIFT1b
-#define MEDOID 178757270 // sift 1B
-//#define MEDOID 642390445 //0 // sift 1B BFS
-#define N 1000000000// total number of nodes in the dataset
-#define NUMTHREADS_COMPUTEPARENT 1
-#endif
+typedef struct __attribute__((__packed__)) _GraphMedatadata 
+{
+	unsigned long long ullMedoid;
+	unsigned long long ulluIndexEntryLen;
+	int uDatatype; 
+	unsigned uDim; // no of dimensions
+	unsigned uDegree; // no of dimensions
+	unsigned uDatasetSize;
+} GraphMedataData; //32 bytes
 
 
+typedef struct _IndexLoad
+{
+	unsigned long long INDEX_ENTRY_LEN ;
+	unsigned long long MEDOID ;
+	unsigned uDataType  ;
+	unsigned D  ;
+	unsigned R  ;
+	unsigned N  ;
+	unsigned int uChunks;
+	unsigned medoidID;
+	uint8_t* pIndex;
+	unsigned long long ullIndex_Entry_LEN;
+	uint8_t* d_compressedVectors;
+	float *d_pqTable;
+	unsigned  *d_chunksOffset;
+	float *d_centroid;
+} IndexLoad;
+
+template<typename T>
+__global__ void populate_pqDist_par(float *d_pqTable, 
+									float* d_pqDistTables, 
+									T* d_queriesFP, 
+									unsigned* d_chunksOffset, 
+									float* d_centroid, 
+									unsigned n_chunks,
+									unsigned long long D);
+
+template<typename T>
+__global__ void compute_L2Dist (T* d_FPSetCoordsList,
+								unsigned* d_FPSetCoordsList_Counts,
+								T* d_queriesFP,
+								unsigned* d_L2ParentIds,
+								float* d_L2distances,
+								unsigned* d_nearestNeighbours,
+								unsigned* d_numQueries,
+								unsigned long long D);
 
 
-
-__global__ void populate_pqDist_par(float *d_pqTable, float* d_pqDistTables, datatype_t* d_queriesFP, unsigned* d_chunksOffset, float* d_centroid, unsigned n_chunks);
-
-
-__global__ void  compute_neighborDist_par(unsigned* d_neighbors, unsigned* d_numNeighbors_query, uint8_t* d_compressedVectors, float* d_pqDistTables, float*  d_neighborsDist_query);
+__global__ void  compute_neighborDist_par(unsigned* d_neighbors, 
+											unsigned* d_numNeighbors_query, 
+											uint8_t* d_compressedVectors, 
+											float* d_pqDistTables, 
+											float*  d_neighborsDist_query,
+											unsigned n_chunks,
+											unsigned R);
 
 __global__ void  compute_parent1(unsigned* d_neighbors, unsigned* d_numNeighbors_query, float* d_neighborsDist_query,
 							unsigned* d_BestLSets, float* d_BestLSetsDist, bool* d_BestLSets_visited,
@@ -139,7 +104,9 @@ __global__ void  compute_parent1(unsigned* d_neighbors, unsigned* d_numNeighbors
 							unsigned* d_iter,
  							unsigned* d_L2ParentIds,
  							unsigned* d_FPSetCoordsList_Counts,
- 							unsigned* d_numQueries);
+ 							unsigned* d_numQueries,
+							unsigned long long MEDOID,
+							unsigned R);
 
 __global__ void  compute_parent2(unsigned* d_neighbors, unsigned* d_numNeighbors_query, float* d_neighborsDist_query,
 							unsigned* d_BestLSets, float* d_BestLSetsDist, bool* d_BestLSets_visited,
@@ -148,26 +115,43 @@ __global__ void  compute_parent2(unsigned* d_neighbors, unsigned* d_numNeighbors
 							unsigned* d_iter,
  							unsigned* d_L2ParentIds,
  							unsigned* d_FPSetCoordsList_Counts,
- 							unsigned* d_numQueries);
+ 							unsigned* d_numQueries,
+							unsigned uWLLen,
+							unsigned long long MEDOID,
+							unsigned R);
 
-__global__ void  compute_BestLSets_par_sort_msort(unsigned* d_neighbors, unsigned* d_neighbors_aux, unsigned* d_neighbors_offset, float* d_neighborsDist_query, float* d_neighborsDist_query_aux,  bool* d_nextIter);
+__global__ void  compute_BestLSets_par_sort_msort(unsigned* d_neighbors, 
+													unsigned* d_neighbors_aux, 
+													unsigned* d_neighbors_offset, 
+													float* d_neighborsDist_query, 
+													float* d_neighborsDist_query_aux,  
+													bool* d_nextIter,
+													unsigned R);
 
-__global__ void  compute_BestLSets_par_merge(unsigned* d_neighbors, unsigned* d_numNeighbors_query, float* d_neighborsDist_query,  unsigned* d_BestLSets, float* d_BestLSetsDist, bool* d_BestLSets_visited,  unsigned* d_parents, unsigned iter, bool* d_nextIter, unsigned* d_BestLSets_count, unsigned* d_mark);
+
+__global__ void  compute_BestLSets_par_merge(unsigned* d_neighbors, 
+												unsigned* d_numNeighbors_query, 
+												float* d_neighborsDist_query, 
+												 unsigned* d_BestLSets, 
+												 float* d_BestLSetsDist, 
+												 bool* d_BestLSets_visited,  
+												 unsigned* d_parents, 
+												unsigned iter, 
+												bool* d_nextIter, 
+												unsigned* d_BestLSets_count, 
+												unsigned* d_mark,
+												unsigned uWLLen,
+												unsigned long long MEDOID,
+												unsigned R);
 
 __global__ void neighbor_filtering_new (unsigned* d_neighbors,
 									unsigned* d_neighbors_temp,
 									unsigned* d_numNeighbors_query,
 									unsigned* d_numNeighbors_query_temp,
-									bool* d_processed_bit_vec);
+									bool* d_processed_bit_vec,
+									unsigned R);
 
 
-__global__ void compute_L2Dist (datatype_t* d_FPSetCoordsList,
-								unsigned* d_FPSetCoordsList_Counts,
-								datatype_t* d_queriesFP,
-								unsigned* d_L2ParentIds,
-								float* d_L2distances,
-								unsigned* d_nearestNeighbours,
-								unsigned* d_numQueries);
 
 __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 						unsigned* d_L2ParentIds_aux,
@@ -179,7 +163,9 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 						unsigned* d_recall);
 
 __global__ void  compute_neighborDist_par_cachewarmup(unsigned* d_neighbors,
-											uint8_t* d_compressedVectors);
+											uint8_t* d_compressedVectors,
+											unsigned n_chunks,
+											unsigned R);
 
 __device__ unsigned upper_bound_d(float arr[], unsigned lo, unsigned hi, float target);
 
@@ -199,7 +185,7 @@ typedef struct _Node
 {
   unsigned uNodeID;
   bool bVisited;
-  //int nLevel;
+
 } Node; // size = 8 bytes
 
 typedef std::vector<unsigned> NeighbourList;
@@ -210,7 +196,9 @@ void bfs(unsigned uMedoid,
 		const unsigned nNodesToDiscover,
 		unsigned& visit_counter,
 		NodeIDMap& mapNodeIDToNode,
-		uint8_t* pGraph);
+		uint8_t* pGraph,
+		unsigned long long ullIndex_Entry_LEN,
+		unsigned long long D);
 
 class cached_ifstream {
 	public:
