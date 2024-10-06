@@ -25,7 +25,6 @@ limitations under the License.
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
 #include "parANN.h"
-#include "bang.h"
 #include "utils/utils.h"
 #include "utils/timer.h"
 #include <chrono>
@@ -112,6 +111,7 @@ unsigned long long log_message (const char* message)
 
 
 static IndexLoad objIndexLoad;
+static SearchParams objSearchParams;
 template<typename T>
 void bang_load(char* indexfile_path_prefix)
 {
@@ -303,22 +303,40 @@ void bang_load(char* indexfile_path_prefix)
 template void bang_load<float>(char* );
 template void bang_load<uint8_t>(char* );
 
+void bang_load_c(char* pszPath)
+{
+	bang_load<uint8_t>(pszPath);
+}
+
+void bang_set_searchparams(int recall, int worklist_length)
+{
+	objSearchParams.recall = recall;
+	objSearchParams.worklist_length = worklist_length;
+}
+
+void bang_set_searchparams_c(int recall, int worklist_length)
+{
+	objSearchParams.recall = recall;
+	objSearchParams.worklist_length = worklist_length;
+}
+
 template<typename T>
-void bang_query(char* query_file, char* groundtruth_file, int num_queries, int recal_param) 
+void bang_query(T* query_array, int num_queries, 
+					result_ann_t* nearestNeighbours,
+					float* nearestNeighbours_dist ) 
 {
 	// the eight i/p files (7 bin + 1 txt)
 	
-	string queryPointsFP_file = string(query_file);
-	string truthset_bin = string(groundtruth_file);
 	unsigned numQueries = num_queries;
-	unsigned numThreads_K4 = 1;//atol(argv[5]); // 1	compute_parent
-	unsigned numThreads_K1 = 256;//atol(argv[6]); //256	populate_pqDist_par
-	unsigned numThreads_K2 = 512;//atol(argv[7]); // 512 compute_neighborDist_par
-	unsigned numThreads_K5 = 256;//atol(argv[8]); // 256	neighbor_filtering_new
-	unsigned recall_at = recal_param;// 10
-	unsigned numCPUthreads = 64;//atoi(argv[10]); // 64 // ToDo: get his dynamically
-	unsigned bitCapabilities = 1;//atoi(argv[11]); // 1,2,4,8,..
+	unsigned numThreads_K4 = 1; //	compute_parent
+	unsigned numThreads_K1 = 256;//	populate_pqDist_par
+	unsigned numThreads_K2 = 512;// compute_neighborDist_par
+	unsigned numThreads_K5 = 256;// neighbor_filtering_new
+	unsigned recall_at = objSearchParams.recall; // 10
+	unsigned numCPUthreads = 64;//64 // ToDo: get his dynamically
+	unsigned bitCapabilities = 1;// 1,2,4,8,..
 	unsigned K4_blockSize = 256;
+
 	// Assign Capabilites
 	bool bEnableGPUStats = false;
 	bool bCacheWarmUp = false;
@@ -329,58 +347,19 @@ void bang_query(char* query_file, char* groundtruth_file, int num_queries, int r
 	if (bitCapabilities & ENABLE_CACHE_WARMUP)
 		bCacheWarmUp = true;
 
-
-
 	printf("BF Memory = %u BF_ENTRIES = %u\n",BF_MEMORY, BF_ENTRIES);
-	/* Input files needed and their format
-	1) pqTable_file  (binary)
-	2) compressedVector_file (binary)
-	3) graphAdjList_file (binary) // DiskANN generated graph (.index file) converted to .bin format), using index_to_binary_graph.py
-	                              // The .bin format is : FP vector, Degre, NeighborList
-	                              //
-	4) queryPointsFP_file (binary)
-	5) chunkOffsets_file (binary)
-	6) centroid_file (binary)
-	7) truthset_bin (binary)
-	*/
 
 	unsigned long long INDEX_ENTRY_LEN = objIndexLoad.INDEX_ENTRY_LEN;
 	unsigned long long MEDOID = objIndexLoad.MEDOID;
-	//unsigned uDataType  = objIndexLoad.uDataType;
 	unsigned D  = objIndexLoad.D;
 	unsigned R  = objIndexLoad.R;
-	//unsigned N  = objIndexLoad.N;
 
-	// SEARCH PART
-	T* queriesFP = NULL;
-
-	queriesFP = (T*) malloc(sizeof(T)* numQueries * D);	// full floating point coordinates of queries
-
-	if (NULL == queriesFP)
-	{
-		printf("Error.. Malloc failed for queriesFP");
-		return;
-	}
-
-	ifstream in4(queryPointsFP_file, std::ios::binary);
-	if(!in4.is_open()){
-		printf("Error.. Could not open the Query File: %s\n", queryPointsFP_file.c_str());
-		return;
-	}
-
-	in4.seekg(8);
-	in4.read((char*)queriesFP,sizeof(T)*D*numQueries);
-	in4.close();
-
-	
-	
-	
+	T* queriesFP = query_array;
 
 	// CPU Data Structs
 	unsigned *neighbors = NULL;
 	unsigned *numNeighbors_query = NULL;
 	unsigned *parents = NULL;
-	unsigned *nearestNeighbours = NULL;
 	const unsigned long long FPSetCoords_size_bytes = D * sizeof(T);
 
 	const unsigned long long FPSetCoords_rowsize_bytes = FPSetCoords_size_bytes * numQueries;
@@ -399,7 +378,8 @@ void bang_query(char* query_file, char* groundtruth_file, int num_queries, int r
 
 
 	// Final set of K NNs for eacy query will be collected here (sent by GPU)
-	nearestNeighbours = (unsigned*)malloc(sizeof(unsigned) * recall_at * numQueries);
+	//nearestNeighbours = (unsigned*)malloc(sizeof(unsigned) * recall_at * numQueries);
+	//nearestNeighbours_dist = (unsigned*)malloc(sizeof(float) * recall_at * numQueries);
 	// Allocate host pinned memory for async memcpy
 	// [dataset Dimensions * numQuereis] * numIterations
 	
@@ -455,7 +435,7 @@ void bang_query(char* query_file, char* groundtruth_file, int num_queries, int r
 	unsigned* d_L2ParentIds_aux = NULL; // // M x N dimensions
 
 
-	unsigned *d_nearestNeighbours = NULL;
+	result_ann_t *d_nearestNeighbours = NULL;
 	// A specific stream to to H2D of the FP vectors
  	cudaStream_t streamFPTransfers;
  	cudaStream_t streamKernels;
@@ -518,7 +498,7 @@ void bang_query(char* query_file, char* groundtruth_file, int num_queries, int r
 
 
 	gpuErrchk(cudaMalloc(&d_FPSetCoordsList_Counts, numQueries * sizeof(unsigned) ));
-	gpuErrchk(cudaMalloc(&d_nearestNeighbours, (recall_at * numQueries) * sizeof(unsigned) ));// Dim: [recall_at * numQueries]
+	gpuErrchk(cudaMalloc(&d_nearestNeighbours, (recall_at * numQueries) * sizeof(result_ann_t) ));// Dim: [recall_at * numQueries]
 	gpuErrchk(cudaMalloc(&d_numQueries,sizeof(unsigned)));
 
 	gpuErrchk(cudaMalloc(&d_recall,sizeof(unsigned)));
@@ -553,12 +533,11 @@ void bang_query(char* query_file, char* groundtruth_file, int num_queries, int r
 	unsigned* L2ParentIds = (unsigned*)malloc(sizeof(unsigned) * numQueries);
 	unsigned* FPSetCoordsList_Counts = (unsigned*)malloc(sizeof(unsigned) * numQueries);
 
-do // this is just to run the entire search multiple runs for consistent stats reporting
-{
+//do // this is just to run the entire search multiple runs for consistent stats reporting
+
 	// re-read the L value
-	unsigned uWLLen = L;
-	cout << "Enter value of WorkList Length" << endl;
-	cin >> uWLLen;
+	unsigned uWLLen = objSearchParams.worklist_length;
+
 	assert(uWLLen <= L);	// Max thread block size
 	numThreads_K3_merge = 2*uWLLen;
 	assert(numThreads_K3_merge <= 1024);	// Max thread block size
@@ -1092,7 +1071,6 @@ do // this is just to run the entire search multiple runs for consistent stats r
 												d_queriesFP,
 												d_L2ParentIds,
 												d_L2distances,
-												d_nearestNeighbours,
 												d_numQueries,
 												D);
 
@@ -1192,53 +1170,38 @@ do // this is just to run the entire search multiple runs for consistent stats r
 
 	start = std::chrono::high_resolution_clock::now();
 
-	gpuErrchk(cudaMemcpy(nearestNeighbours, d_nearestNeighbours, sizeof(unsigned) * (recall_at * numQueries),
+	gpuErrchk(cudaMemcpy(nearestNeighbours, d_nearestNeighbours, sizeof(result_ann_t) * (recall_at * numQueries),
 				cudaMemcpyDeviceToHost));
+	gpuErrchk(cudaMemcpy(nearestNeighbours_dist, d_L2distances, sizeof(float) * (recall_at * numQueries),
+				cudaMemcpyDeviceToHost));				
 	stop = std::chrono::high_resolution_clock::now();
 	time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
 
 	// re-rnking end
 #endif
 
-	// Copy the BestLSets to CPU
-	unsigned* BestLSets = (unsigned*)malloc(sizeof(unsigned) * (uWLLen * numQueries));
-	gpuErrchk(cudaMemcpy(BestLSets, d_BestLSets, sizeof(unsigned) * (uWLLen * numQueries),
-	cudaMemcpyDeviceToHost));
-
 	auto milliEnd = log_message("SEARCH END");
-	omp_set_num_threads(numCPUthreads);
-	#pragma omp parallel
-	{
-		int CPUthreadno =  omp_get_thread_num();
-		vector<unsigned> query_best;
+	cout << "Sizeof result_ann_t: " << sizeof(result_ann_t) << endl;
 
-		for(unsigned ii=CPUthreadno; ii < numQueries; ii = ii + numCPUthreads)
+/*
+for (int  nIter = 0; nIter < 2; nIter++)
+{
+		for (int nIterInner = 0; nIterInner < recall_at; nIterInner++)
 		{
-			query_best.clear();
-			for(unsigned jj=0; jj < recall_at; ++jj)
-			{
-				query_best.push_back(nearestNeighbours[ ( numQueries * jj) + ii]);
-				// use best L-Set instead directly for ANNs instead of re-ranking
-				//query_best.push_back(BestLSets[ (L * ii) + jj]);
-			}
-
-			#pragma omp critical
-			{
-				final_bestL1[ii] = query_best;
-//				printf("final_bestL1[%d] size = %lu \n", ii, final_bestL1[ii].size());
-			}
+			cout << nearestNeighbours[(nIter*recall_at) + nIterInner] << "\t" ;
+			//cout << nearestNeighbours[(nIter*recall_at) + nIterInner] << "\t" ;
 		}
-	}
-
-
-
+		cout << endl;
+}
+*/
 #ifdef FREE_AFTERUSE
 	free(queriesFP);
 	queriesFP = NULL;
 	gpuErrchk(cudaFreeHost(FPSetCoordsList));
-	free(nearestNeighbours);
-	nearestNeighbours = NULL;
-
+	//free(nearestNeighbours);
+	//nearestNeighbours = NULL;
+	//free(nearestNeighbours_dist);
+	//nearestNeighbours_dist = NULL;
 	gpuErrchk(cudaFree(d_queriesFP));
 	gpuErrchk(cudaFree(d_FPSetCoordsList));
 	gpuErrchk(cudaFree(d_FPSetCoordsList_Counts));// ToDo used for calculating total parents down
@@ -1269,7 +1232,7 @@ do // this is just to run the entire search multiple runs for consistent stats r
 		time_B2_avg = time_B2_avg + (time_B2_vec[idx] - time_B2_avg)/(idx+1); // running average
 		time_B2 += time_B2_vec[idx];
 	}
-
+#if 1
 	cout << "STATS:" << endl;
 	cout << "(1) total time_K1 = " << time_K1 << " ms" << endl;
 	cout << "(2) avg. time_B1 = " << time_B1_avg << " ms" << endl;
@@ -1295,37 +1258,7 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	cout << "Throughput (Exclude Mem Transfers) = " << (numQueries * 1000.0) / (totalTime_wallclock - time_transfer / 1000) << " QPS" << endl;
 
 
-	// Computing the recall
-
-	unsigned*         gt_ids = nullptr;
-	float*            gt_dists = nullptr;
-	size_t            gt_num, gt_dim;
-	std::vector<uint64_t> Lvec;
-	bool calc_recall_flag = false;
-
-
-	uint64_t curL = uWLLen;
-	if (curL >= recall_at)
-		Lvec.push_back(curL);
-
-	// Like DiskANN o/p we wannted to run with multiple L's in a single invocation of the program
-	// So, test_id to each run with a specific L value. But, currently, we have only one L value
-	// i.e. Lvec.size() == 1
-	if (Lvec.size() == 0) {
-		std::cout << "No valid Lsearch found. Lsearch must be at least recall_at."
-			<< std::endl;
-		exit(1);
-	}
-	if (file_exists(truthset_bin)) {
-		load_truthset(truthset_bin, gt_ids, gt_dists, gt_num, gt_dim);
-		calc_recall_flag = true;
-	}
-	std::cout.setf(std::ios_base::fixed, std::ios_base::floatfield);
-	std::cout.precision(2);
-	std::string         recall_string = "Recall@" + std::to_string(recall_at);
-	cout << "Ls\t" << recall_string  << endl;
-	std::vector<std::vector<unsigned> > query_result_ids(Lvec.size());
-
+	
 	unsigned total_size=0;
 #ifdef _DBG_BOUNDS
 	unsigned* FPSetCoordsList_Counts_temp = (unsigned*)malloc(sizeof(unsigned) * numQueries);
@@ -1337,21 +1270,9 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	}
 	free(FPSetCoordsList_Counts_temp);
 #endif
-	for (unsigned test_id = 0; test_id < Lvec.size(); test_id++) {
-		unsigned L1 = Lvec[test_id];
-		query_result_ids[test_id].resize(recall_at * numQueries);
-
-		for(unsigned ii = 0; ii < numQueries; ++ii) {
-			//total_size += final_bestL1[ii].size();
-			for(unsigned jj = 0; jj < recall_at; ++jj) {
-				query_result_ids[test_id][ii*recall_at+jj] = final_bestL1[ii][jj];
-			}
-		}
-		float recall = 0;
-		if (calc_recall_flag)
-			recall = calculate_recall(numQueries, gt_ids, gt_dists, gt_dim, query_result_ids[test_id].data(), recall_at, recall_at);
-		cout << L1 << "\t" << recall << "\t total candidates " << total_size << endl;
-	}
+	
+	cout << "Total candidates " << total_size << endl;
+#endif
 
 	// reset counters for next run
 	time_K1 = 0.0f;
@@ -1367,11 +1288,7 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	fp_set_time_gpu = 0;
 	iter = 1;
 
-	char c = 'n';
-	cout << "Try Next run ? [y|n]" << endl;
-	cin >> c;
-	if (c !='y')
-		break;
+
 
 	// Free loop-specific data structs that need to be updated in the next run E.g.L
 	gpuErrchk(cudaFreeHost(FPSetCoordsList));
@@ -1385,15 +1302,28 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	gpuErrchk(cudaFree(d_BestLSetsDist));
 	gpuErrchk(cudaFree(d_BestLSets));
 
-}// outer do-while for running the search multiple times. The stats across runs can be averaged etc
-// for a reporting results in a consistent manner (i.e. avoid affect of outliers)
-while (1);
 }
 
-template void bang_query<float>(char* query_file, char* groundtruth_file, int num_queries, int recal_param) ;
-template void bang_query<uint8_t>(char* query_file, char* groundtruth_file, int num_queries, int recal_param) ;
+template void bang_query<float>(float* query_file, int num_queries, 
+						result_ann_t* nearestNeighbours, float* nearestNeighbours_dist ) ;
+template void bang_query<uint8_t>(uint8_t* query_file, int num_queries, 
+						result_ann_t* nearestNeighbours, float* nearestNeighbours_dist ) ;
 
-
+void bang_query_c(uint8_t* query_array, int num_queries, 
+					result_ann_t* nearestNeighbours,
+					float* nearestNeighbours_dist )
+{
+	bang_query<uint8_t>(query_array,num_queries, nearestNeighbours, nearestNeighbours_dist );
+	/*cout << "From BANG: ";
+	for (int  nIter = 0; nIter < 2; nIter++)
+	{
+		for (int nIterInner = 0; nIterInner < objSearchParams.recall; nIterInner++)
+		{
+			cout << nearestNeighbours[(nIter*objSearchParams.recall) + nIterInner] << "\t" ;
+		}
+		cout << endl;
+	}*/
+}
 
 
 /**
@@ -1589,7 +1519,6 @@ __global__ void compute_L2Dist (T* d_FPSetCoordsList,
 								T* d_queriesFP,
 								unsigned* d_L2ParentIds,
 								float* d_L2distances,
-								unsigned* d_nearestNeighbours,
 								unsigned* d_numQueries,
 								unsigned long long D)
 {
@@ -1627,7 +1556,7 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 						unsigned* d_FPSetCoordsList_Counts,
 						float* d_L2distances,
 						float* d_L2distances_aux,
-						unsigned* d_nearestNeighbours,
+						result_ann_t* d_nearestNeighbours,
 						unsigned* d_numQueries,
 						unsigned* d_recall)
 {
@@ -1676,7 +1605,8 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 	}
 	for(unsigned ii = tid; ii < *d_recall; ii += blockDim.x)
 	{
-		d_nearestNeighbours[( (*d_numQueries) * ii) + queryID ] = d_L2ParentIds[( (*d_numQueries) * ii) + queryID ];
+		//d_nearestNeighbours[( (*d_numQueries) * ii) + queryID ] = d_L2ParentIds[( (*d_numQueries) * ii) + queryID ];
+		d_nearestNeighbours[( (*d_recall * queryID) ) + ii ] = d_L2ParentIds[( (*d_numQueries) * ii) + queryID ];
 	}
 }
 
@@ -2208,123 +2138,8 @@ void bfs(unsigned uMedoid,
 
 
 
-/*Helper function*/
-void cached_ifstream :: open(const std::string& filename, uint64_t cacheSize) {
-	this->cur_off = 0;
-	reader.open(filename, std::ios::binary | std::ios::ate);
-	fsize = reader.tellg();
-	reader.seekg(0, std::ios::beg);
-	assert(reader.is_open());
-	assert(cacheSize > 0);
-	cacheSize = (std::min)(cacheSize, fsize);
-	this->cache_size = cacheSize;
-	cache_buf = new char[cacheSize];
-	reader.read(cache_buf, cacheSize);
-	cout << "Opened: " << filename.c_str() << ", size: " << fsize
-		<< ", cache_size: " << cacheSize << std::endl;
-}
-
-size_t cached_ifstream :: get_file_size() {
-	return fsize;
-}
-void cached_ifstream :: read(char* read_buf, uint64_t n_bytes) {
-	assert(cache_buf != nullptr);
-	assert(read_buf != nullptr);
-	if (n_bytes <= (cache_size - cur_off)) {
-		// case 1: cache contains all data
-		memcpy(read_buf, cache_buf + cur_off, n_bytes);
-		cur_off += n_bytes;
-	} else {
-		// case 2: cache contains some data
-		uint64_t cached_bytes = cache_size - cur_off;
-		if (n_bytes - cached_bytes > fsize - reader.tellg()) {
-			std::stringstream stream;
-			stream << "Reading beyond end of file" << std::endl;
-			stream << "n_bytes: " << n_bytes << " cached_bytes: " << cached_bytes
-				<< " fsize: " << fsize << " current pos:" << reader.tellg()
-				<< std::endl;
-			cout << stream.str() << std::endl;
-			exit(1);
-		}
-		memcpy(read_buf, cache_buf + cur_off, cached_bytes);
-
-		reader.read(read_buf + cached_bytes, n_bytes - cached_bytes);
-		cur_off = cache_size;
-
-		uint64_t size_left = fsize - reader.tellg();
-
-		if (size_left >= cache_size) {
-			reader.read(cache_buf, cache_size);
-			cur_off = 0;
-		}
-
-	}
-}
 
 
-/*Helper function*/
-/*
-our_results is a 1-D array : <query1 NN Ids>  <query2 NN Ids>
-<query x NN Ids> = esactly recall_at entries indicating the node ids of the NNs for that query
-
-intersection of gt and res gives the recall.
-Note: gt.size() could be >= recall_at duu to tie breaking
-*/
-
-double calculate_recall(unsigned num_queries, unsigned *gold_std,
-		float *gs_dist, unsigned dim_gs,
-		unsigned *our_results, unsigned dim_or,
-		unsigned recall_at) {
-	double             total_recall = 0;
-	std::set<unsigned> gt, res;
-
-	for (size_t i = 0; i < num_queries; i++) {
-
-		gt.clear();
-		res.clear();
-		unsigned *gt_vec = gold_std + dim_gs * i;
-		unsigned *res_vec = our_results + dim_or * i;
-		size_t    tie_breaker = recall_at;
-
-		if (gs_dist != nullptr) {
-			tie_breaker = recall_at - 1;
-			float *gt_dist_vec = gs_dist + dim_gs * i;
-			while (tie_breaker < dim_gs &&
-					gt_dist_vec[tie_breaker] == gt_dist_vec[recall_at - 1])
-				tie_breaker++;
-		}
-
-		gt.insert(gt_vec, gt_vec + tie_breaker);
-		res.insert(res_vec, res_vec + recall_at);
-
-#if 0
-		if (i == 0)template<typename T>
-			std::cout << "gt size = " << gt.size()  << "res size = " << res.size() << std::endl;
-
-		set<unsigned>::iterator iter = gt.begin();
-		while(iter != gt.end())
-		{
-			std:: cout << *(iter++) << "\t";
-		}
-		std::cout << "\t" << std::endl;
 
 
-		iter = res.begin();
-		while(iter != res.end())
-		{
-			std:: cout << *(iter++) << "\t";
-		}
-		std::cout << "\t" << std::endl;
-#endif
-		unsigned cur_recall = 0;
-		for (auto &v : gt) {
-			if (res.find(v) != res.end()) {
-				cur_recall++;
-			}
-		}
-		total_recall += cur_recall;
 
-	}
-	std::cout << "total_recall = " << total_recall << " " << "num_queries = " <<  num_queries << " recall_at " << recall_at << endl;
-	return total_recall / (num_queries) * (100.0 / recall_at);
-}

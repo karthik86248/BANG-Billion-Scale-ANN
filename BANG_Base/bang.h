@@ -14,7 +14,7 @@ limitations under the License.
 
 #ifndef BANG_H_
 #define BANG_H_
-
+typedef unsigned long result_ann_t ; // big-ann-benchmarks requires the final ANNs to be returned as int64_t
 /*! @brief Load the graph index, compressed vectors etc into CPU/GPU memory.
 *
 * The graph index, compressed vectors has to be generated using DiskANN.
@@ -25,6 +25,13 @@ limitations under the License.
 */
 template<typename T>
 void bang_load( char* indexfile_path_prefix);
+
+extern "C" void bang_load_c( char* indexfile_path_prefix);
+
+
+void bang_set_searchparams(int recall, int worklist_length);
+
+extern "C"  void bang_set_searchparams_c(int recall, int worklist_length);
 
 /*! @brief Runs search queries on the laoded index..
 *
@@ -37,7 +44,17 @@ void bang_load( char* indexfile_path_prefix);
 * @param[in] recal_param k-recall@k.
 
 */
+
 template<typename T>
-void bang_query(char* query_file, char* groundtruth_file, int num_queries, int recal_param);
+void bang_query(T* query_array, 
+                    int num_queries, 
+                    result_ann_t* nearestNeighbours,
+					float* nearestNeighbours_dist );
+
+extern "C" void bang_query_c(uint8_t* query_array, 
+                    int num_queries, 
+                    result_ann_t* nearestNeighbours,
+					float* nearestNeighbours_dist );
+
 
 #endif //BANG_H_
