@@ -16,6 +16,7 @@ limitations under the License.
 #include <cstring>
 #include <omp.h>
 #include <sys/stat.h>
+#include <cmath>
 #include <vector>
 #include <set>
 #include <cstdint>
@@ -27,10 +28,12 @@ limitations under the License.
 #include "bang.h"
 using namespace std;
 
+
 double calculate_recall(unsigned num_queries, unsigned *gold_std,
-		float *gs_dist, unsigned dim_gs,
-		result_ann_t *our_results, unsigned dim_or,
-		unsigned recall_at) {
+						float *gs_dist, unsigned dim_gs,
+						result_ann_t *our_results, unsigned dim_or,
+						unsigned recall_at) 
+{
 	double             total_recall = 0;
 	std::set<unsigned> gt, res;
 
@@ -163,7 +166,44 @@ void cached_ifstream :: read(char* read_buf, uint64_t n_bytes) {
 
 	}
 }
+inline void      open_file_to_write(std::ofstream&     writer,
+                                    const std::string& filename) {
+  writer.exceptions(std::ofstream::failbit | std::ofstream::badbit);
+  if (!file_exists(filename))
+    writer.open(filename, std::ios::binary | std::ios::out);
+  else
+    writer.open(filename, std::ios::binary | std::ios::in | std::ios::out);
 
+  if (writer.fail()) {
+    char buff[1024];
+    strerror_r(errno, buff, 1024);
+
+    cerr << std::string("Failed to open file") + filename +
+                         " for write because " + buff
+                  << std::endl;
+  }
+}
+
+  template<typename T>
+  inline uint64_t save_bin(const std::string& filename, T* data, size_t npts,
+                           size_t ndims, size_t offset = 0) {
+    std::ofstream writer;
+    open_file_to_write(writer, filename);
+
+    cout << "Writing bin: " << filename.c_str() << std::endl;
+    writer.seekp(offset, writer.beg);
+    int    npts_i32 = (int) npts, ndims_i32 = (int) ndims;
+    size_t bytes_written = npts * ndims * sizeof(T) + 2 * sizeof(uint32_t);
+    writer.write((char*) &npts_i32, sizeof(int));
+    writer.write((char*) &ndims_i32, sizeof(int));
+    cout << "bin: #pts = " << npts << ", #dims = " << ndims
+                  << ", size = " << bytes_written << "B" << std::endl;
+
+    writer.write((char*) data, npts * ndims * sizeof(T));
+    writer.close();
+    cout << "Finished writing bin." << std::endl;
+    return bytes_written;
+  }
 // compute ground truth
 
 inline void load_truthset(const std::string& bin_file, uint32_t*& ids,
@@ -201,28 +241,79 @@ inline void load_truthset(const std::string& bin_file, uint32_t*& ids,
 	dists = new float[npts * dim];
 	reader.read((char*) dists, npts * dim * sizeof(float));
 }
+const string DT_UINT8("uint8");
+const string DT_INT8("int8");
+const string DISTFUNC_MIPS("mips");
 
-int main(int argc, char** argv)
+const string DT_FLOAT("float");
+template <typename T>
+void preprocess_query_file(string queryPointsFP_file, int numQueries)
+{
+	// load the queries
+	T* queriesFP = NULL;
+	// ToDo : handle case of non-float datatype 
+	float* queriesFP_transformed = NULL;
+
+	ifstream in4(queryPointsFP_file, std::ios::binary);
+	if(!in4.is_open()){
+		printf("Error.. Could not open the Query File: %s\n", queryPointsFP_file.c_str());
+		return ;
+	}
+
+	in4.seekg(4);
+	int Dim = 0;
+	in4.read((char*)&Dim, sizeof(int));
+	
+	queriesFP = (T*) malloc(sizeof(T)* numQueries * Dim);	// full floating point coordinates of queries
+	queriesFP_transformed = (float*) malloc(sizeof(float)* numQueries * (Dim+1));
+	if (NULL == queriesFP || NULL == queriesFP_transformed)
+	{
+		printf("Error.. Malloc failed for queriesFP");
+		return ;
+	}
+
+	in4.read((char*)queriesFP,sizeof(T)*Dim*numQueries);
+	in4.close();
+
+
+	unsigned numCPUthreads = 64;
+	omp_set_num_threads(numCPUthreads);
+
+
+	#pragma omp parallel
+	{
+		int CPUthreadno =  omp_get_thread_num();
+		for(unsigned ii=CPUthreadno; ii < numQueries; ii = ii + numCPUthreads)
+		{
+			float        query_norm = 0;
+			float* query1 = queriesFP + (ii*Dim);
+ 			for (uint32_t i = 0; i < Dim; i++) 
+			{
+			    query_norm += (query1[i] * query1[i]);
+			}
+			query_norm = std::sqrt(query_norm);
+			float* query1_transformed = queriesFP_transformed + (ii*(Dim+1));
+			query1_transformed[(Dim)] = 0;
+			for (uint32_t i = 0; i < Dim; i++) 
+			{
+			    query1_transformed[i] = query1[i]/query_norm;
+			}
+    	}			
+	}
+	save_bin(queryPointsFP_file+"_transfromed",queriesFP_transformed,numQueries,Dim+1);
+	free(queriesFP);
+	free(queriesFP_transformed);
+}
+
+
+template <typename T>
+int run_anns(char** argv)
 {
 
-	if (argc < 6) {
-		cerr << "Too few parameters! " << argv[0] << " " << "<path with file prefix to the director with index files > \
-		<query file> <GroundTruth File> <NumQueries> <recall parameter k>"  << endl;
-		exit(1);
-	}
-	cout << "Sizeof result_ann_t : " << sizeof(result_ann_t) << endl;
-	/*
-
-	1. Directory of INdex Files
-	2. Query file
-	3. GroundTruth File
-	4. Number of Queries
-	5. 
-	*/ 
-	bang_load<uint8_t>(argv[1]);
+	bang_load<T>(argv[1]);
 
 	// load the queries
-	uint8_t* queriesFP = NULL;
+	T* queriesFP = NULL;
 	int numQueries = atoi(argv[4]);
 	
 	string queryPointsFP_file = string(argv[2]);
@@ -236,7 +327,7 @@ int main(int argc, char** argv)
 	int Dim = 0;
 	in4.read((char*)&Dim, sizeof(int));
 	
-	queriesFP = (uint8_t*) malloc(sizeof(uint8_t)* numQueries * Dim);	// full floating point coordinates of queries
+	queriesFP = (T*) malloc(sizeof(T)* numQueries * Dim);	// full floating point coordinates of queries
 
 	if (NULL == queriesFP)
 	{
@@ -244,11 +335,16 @@ int main(int argc, char** argv)
 		return -1;
 	}
 
-	in4.read((char*)queriesFP,sizeof(uint8_t)*Dim*numQueries);
+	in4.read((char*)queriesFP,sizeof(T)*Dim*numQueries);
 	in4.close();
 
 	int recall_param = atoi(argv[5]);
 	int nWLLen = 10;
+	DistFunc uDistFunc = ENUM_DIST_L2;
+
+	if (DISTFUNC_MIPS == argv[7] )
+		uDistFunc = ENUM_DIST_MIPS;
+
 	do
 	{
 		
@@ -260,8 +356,8 @@ int main(int argc, char** argv)
 		vector<vector<result_ann_t>> final_bestL1;	// Per query vector to store the visited parent and its distance to query point
 		final_bestL1.resize(numQueries);
 
-		bang_set_searchparams(recall_param, nWLLen);
-		bang_query<uint8_t>(queriesFP,  numQueries, nearestNeighbours,  nearestNeighbours_dist ) ;
+		bang_set_searchparams(recall_param, nWLLen, uDistFunc);
+		bang_query<T>(queriesFP,  numQueries, nearestNeighbours,  nearestNeighbours_dist ) ;
 
 		// compute recall
 		unsigned numCPUthreads = 64;
@@ -347,6 +443,48 @@ int main(int argc, char** argv)
 	}while (1);
 
 	free(queriesFP);
+	return 0;
+}
+/*
+void run_anns<uint8_t>(char** argv);
+void run_anns<int8_t>(char** argv);
+void run_anns<float>(char** argv);
+*/
+
+
+int main(int argc, char** argv)
+{
+	if (argc == 3)
+	{
+		int numQueries = atoi(argv[2]);
+		preprocess_query_file<float>(argv[1], numQueries );
+		return 0;
+	}
+
+	if (argc < 8) {
+		cerr << "Too few parameters! " << argv[0] << " " << "<path with file prefix to the director with index files > \
+		<query file> <GroundTruth File> <NumQueries> <recall parameter k> <data type : uint8, int8 or float> <dist funct: l2 or mips>"   << endl;
+		exit(1);
+	}
+	cout << "Sizeof result_ann_t : " << sizeof(result_ann_t) << endl;
+
+	if (DT_UINT8 == argv[6] )
+	{
+		return run_anns<uint8_t>(argv);
+	}
+	else if (DT_INT8 == argv[6] )
+	{
+		//return run_anns<int8_t>(argv);
+	} 
+	else if (DT_FLOAT == argv[6] )
+	{
+		return run_anns<float>(argv);
+	}
+	else
+	{
+		cerr << "Invalid data type specified" << endl;
+		exit(1);
+	}
 }
 
 

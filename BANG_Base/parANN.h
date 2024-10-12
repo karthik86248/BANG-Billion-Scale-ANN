@@ -30,7 +30,6 @@ using std::string;
 
 #define L 152 // L_search
 
-
 typedef enum _DataTypeEnum
 {
 	ENUM_UNSIGNED_INT8 = 0,
@@ -73,6 +72,7 @@ typedef struct _SearchParams
 {
 	int recall;
 	int worklist_length;
+	unsigned uDistFunc;
 } SearchParams;
 
 template<typename T>
@@ -82,7 +82,8 @@ __global__ void populate_pqDist_par(float *d_pqTable,
 									unsigned* d_chunksOffset, 
 									float* d_centroid, 
 									unsigned n_chunks,
-									unsigned long long D);
+									unsigned long long D,
+									unsigned n_DimAdjust=0);
 
 template<typename T>
 __global__ void compute_L2Dist (T* d_FPSetCoordsList,
@@ -91,7 +92,8 @@ __global__ void compute_L2Dist (T* d_FPSetCoordsList,
 								unsigned* d_L2ParentIds,
 								float* d_L2distances,
 								unsigned* d_numQueries,
-								unsigned long long D);
+								unsigned long long D,
+								unsigned n_DimAdjust=0);
 
 
 __global__ void  compute_neighborDist_par(unsigned* d_neighbors, 

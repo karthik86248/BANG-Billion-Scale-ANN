@@ -58,7 +58,10 @@ int nQueryID = 0;
 
 // Indicates MAX iterations performed. IF there is at least one qeuery that requires neighbour seek
 // for a parent, then iteration will occur. There is one initial iteratoion where Medoid is added (outside do-while)
-#define MAX_PARENTS_PERQUERY  (L + 50) // Needs to be set with expereince. set it to (2*L) if in doubt
+#define MAX_PARENTS_PERQUERY  (L+50) // a #define is needed for shared memory allocation and the dynamic 
+									// value uMAX_PARENTS_PERQUERY canot be used
+
+
 //#define MAX_PARENTS_PERQUERY (20)
 
 // length of each entry in INDEX file 128 bytes (FP) + 4 bytes (degree) + 256 bytes (AdjList for R=64)
@@ -143,8 +146,6 @@ void bang_load(char* indexfile_path_prefix)
 		return;
 	}
 	cout << graphAdjListAndFP_file<< endl;
-
-	
 
 	// Reading the Graph Metadata File
 	GraphMedataData objGrapMetaData;
@@ -234,7 +235,9 @@ void bang_load(char* indexfile_path_prefix)
 	cout << "mlock ret for Index: " << nRetIndex << endl;
 	if (nRetIndex)
 		perror("Index File");
+	log_message("LOAD STARTED");		
 	in3.read((char*)pIndex, size_indexfile);
+	log_message("LOAD ENDED");		
 	in3.close();
 	
 // Loading chunk offsets
@@ -308,16 +311,18 @@ void bang_load_c(char* pszPath)
 	bang_load<uint8_t>(pszPath);
 }
 
-void bang_set_searchparams(int recall, int worklist_length)
+void bang_set_searchparams(int recall, int worklist_length, DistFunc nDistFunc)
 {
 	objSearchParams.recall = recall;
 	objSearchParams.worklist_length = worklist_length;
+	objSearchParams.uDistFunc = nDistFunc;
 }
 
-void bang_set_searchparams_c(int recall, int worklist_length)
+void bang_set_searchparams_c(int recall, int worklist_length, DistFunc nDistFunc)
 {
 	objSearchParams.recall = recall;
 	objSearchParams.worklist_length = worklist_length;
+	objSearchParams.uDistFunc = nDistFunc;
 }
 
 template<typename T>
@@ -541,8 +546,9 @@ void bang_query(T* query_array, int num_queries,
 	assert(uWLLen <= L);	// Max thread block size
 	numThreads_K3_merge = 2*uWLLen;
 	assert(numThreads_K3_merge <= 1024);	// Max thread block size
-	unsigned uMAX_PARENTS_PERQUERY = (uWLLen + 50) ;
+	unsigned uMAX_PARENTS_PERQUERY = (uWLLen + 50) ; //Needs to be set with expereince. set it to (2*L) if in doubt
 
+	assert ( uMAX_PARENTS_PERQUERY <= MAX_PARENTS_PERQUERY);
 	gpuErrchk(cudaMallocHost(&FPSetCoordsList, (uMAX_PARENTS_PERQUERY * numQueries) * FPSetCoords_size_bytes));
 	gpuErrchk(cudaMalloc(&d_FPSetCoordsList, (uMAX_PARENTS_PERQUERY * numQueries) * FPSetCoords_size_bytes )); // Dim: [numIterations * numQueries]
 	gpuErrchk(cudaMalloc(&d_L2distances, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(float) )); // Dim: [numIterations * numQueries]
@@ -651,6 +657,7 @@ void bang_query(T* query_array, int num_queries,
 
 	auto milliStart = log_message("SEARCH STARTED");
 	auto start = std::chrono::high_resolution_clock::now();
+
 	gpuErrchk(cudaMemcpy(d_queriesFP, queriesFP, sizeof(T) * (D*numQueries), cudaMemcpyHostToDevice));
 	auto stop = std::chrono::high_resolution_clock::now();
 	time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
@@ -666,7 +673,8 @@ void bang_query(T* query_array, int num_queries,
 							objIndexLoad.d_chunksOffset, 
 							objIndexLoad.d_centroid, 
 							objIndexLoad.uChunks,
-							D);
+							D,
+							objSearchParams.uDistFunc == ENUM_DIST_MIPS ? MIPS_EXTRA_DIM : 0);
 	gputimer.Stop();
 	time_K1 += gputimer.Elapsed();
 
@@ -1017,7 +1025,7 @@ void bang_query(T* query_array, int num_queries,
 	// GPU
 	gpuErrchk(cudaFree(d_compressedVectors));
 	// ToDo : More data structs can be free'd
-	gpuErrchk(cudaFree(d_chunksOffset));
+	gpuErrchk(cudaFree(A));
 	gpuErrchk(cudaFree(d_pqTable));
 	gpuErrchk(cudaFree(d_pqDistTables));
 	gpuErrchk(cudaFree(d_processed_bit_vec));
@@ -1072,7 +1080,8 @@ void bang_query(T* query_array, int num_queries,
 												d_L2ParentIds,
 												d_L2distances,
 												d_numQueries,
-												D);
+												D,
+												objSearchParams.uDistFunc == ENUM_DIST_MIPS ? MIPS_EXTRA_DIM : 0);
 
 #ifdef _DBG_RERANKING
 {
@@ -1344,7 +1353,8 @@ __global__ void populate_pqDist_par(float* d_pqTable_T,
 									unsigned* d_chunksOffset, 
 									float* d_centroid, 
 									unsigned n_chunks,
-									unsigned long long D)
+									unsigned long long D,
+									unsigned n_DimAdjust)
  {
  	// [kv] what happens if shared memory overflows in SIFT 1BN
 	extern __shared__ char array[];
@@ -1355,12 +1365,22 @@ __global__ void populate_pqDist_par(float* d_pqTable_T,
 	unsigned queryID = blockIdx.x;
 	unsigned pqDistTables_offset = queryID * 256 * n_chunks;	// Offset to the beginning of the pqTable entries for this query
 
-	unsigned gid = queryID * D;
+	unsigned gid = queryID * (D - n_DimAdjust);
 	unsigned tid = threadIdx.x;
 
-	for(unsigned i= tid; i < D; i += blockDim.x) {
+	//  0 to (D - (n_DimAdjust)) : correspond to original dimensions
+	for(unsigned i= tid; i < D - (n_DimAdjust); i += blockDim.x) {
 		query_vec[i] = d_queriesFP[gid + i];
 		shm_centroid[i] = d_centroid[i];
+	}
+
+	//  D - (n_DimAdjust) to D  : correspond to extra dimension added for MIPS
+	if (tid >= D - (n_DimAdjust))
+	{
+		for(unsigned i= tid; i < D ; i += blockDim.x) {
+			query_vec[i] = 0;
+			shm_centroid[i] = d_centroid[i];
+		}
 	}
 
 	__syncthreads();
@@ -1520,7 +1540,8 @@ __global__ void compute_L2Dist (T* d_FPSetCoordsList,
 								unsigned* d_L2ParentIds,
 								float* d_L2distances,
 								unsigned* d_numQueries,
-								unsigned long long D)
+								unsigned long long D,
+								unsigned n_DimAdjust)
 {
 	extern __shared__ char array[];
 	//__shared__ T query_vec[D]; //ToDo can be kept in constant/texture memory
@@ -1529,15 +1550,24 @@ __global__ void compute_L2Dist (T* d_FPSetCoordsList,
 	unsigned queryID = blockIdx.x;
 	unsigned numNodes = d_FPSetCoordsList_Counts[queryID];
 	unsigned tid = threadIdx.x;
-	unsigned gid = queryID * D;
+	unsigned gid =  queryID * (D - n_DimAdjust);
 	unsigned numQueries = *d_numQueries;
 	// ToDo : see if this can be made global
 	const unsigned long long FPSetCoords_size = D; // * sizeof(T) Note : To be used for array indexing, hence not byte offsets
 	const unsigned long long FPSetCoords_rowsize = FPSetCoords_size * numQueries;
 
-	for(unsigned ii= tid; ii < D; ii += blockDim.x) {
+	for(unsigned ii= tid; ii < D - (n_DimAdjust); ii += blockDim.x) {
 		query_vec[ii] = d_queriesFP[gid + ii];
 	}
+
+	if (tid >= D - (n_DimAdjust))
+	{
+		for(unsigned i= tid; i < D ; i += blockDim.x) {
+			query_vec[i] = 0;
+			
+		}
+	}
+
 	__syncthreads();
 
 	// one thread block computes the distances of all the nodes for a query,

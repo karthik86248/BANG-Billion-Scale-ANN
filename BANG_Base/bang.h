@@ -15,6 +15,18 @@ limitations under the License.
 #ifndef BANG_H_
 #define BANG_H_
 typedef unsigned long result_ann_t ; // big-ann-benchmarks requires the final ANNs to be returned as int64_t
+
+// Type of Similarity distnace measure
+typedef enum _DistFunc
+{
+	ENUM_DIST_L2 = 0, // Euclidean Distance
+	ENUM_DIST_MIPS, // Max Inner Product Search
+} DistFunc;
+#define MIPS_EXTRA_DIM (1) // To transform MIPS to L2 distance caluclation, extra dim is added to base dataset adn query
+                          // The index file o/p from DiskANN already has 1 DIM added to dataset. We(BANG) add 1 DIM to the query 
+                          // at rum time
+
+
 /*! @brief Load the graph index, compressed vectors etc into CPU/GPU memory.
 *
 * The graph index, compressed vectors has to be generated using DiskANN.
@@ -29,9 +41,11 @@ void bang_load( char* indexfile_path_prefix);
 extern "C" void bang_load_c( char* indexfile_path_prefix);
 
 
-void bang_set_searchparams(int recall, int worklist_length);
+void bang_set_searchparams(int recall, 
+                            int worklist_length,
+                            DistFunc nDistFunc=ENUM_DIST_L2);
 
-extern "C"  void bang_set_searchparams_c(int recall, int worklist_length);
+extern "C"  void bang_set_searchparams_c(int recall, int worklist_length, DistFunc nDistFunc=ENUM_DIST_L2);
 
 /*! @brief Runs search queries on the laoded index..
 *
