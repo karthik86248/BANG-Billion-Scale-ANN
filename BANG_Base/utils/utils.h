@@ -16,6 +16,11 @@ limitations under the License.
 
 #include <cuda_runtime.h>
 #include <stdio.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <iostream>
+
 #define gpuErrchk(ans) {gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort=true) {
   if(code != cudaSuccess)
@@ -25,21 +30,39 @@ inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort=t
   }
  }
 
-// wrap each API call with the gpuErrchk macro, which will process the return status of the API call it wraps
+off_t caclulate_filesize(const char* chFileName)
+{
+	int fd = -1;
 
-// gpuAssert can be modified to raise an exception rather than call exit() in a more sophisticated application if it were required.
+	if ((fd = open(chFileName, O_RDONLY , (mode_t)0 )) == -1)
+	{
+		perror("Error opening file for writing");
+		exit(EXIT_FAILURE);
+	}
 
-//sample usage:
-  //gpuErrchk(cudaMalloc(&d_a, sizeof(int)*1000000000000000));
+	long cur_pos = 0L;
+	off_t file_size = 0L;
 
-/******************************************************************************************************/
+	// file would be opened with file offset set to the very beginning
+	cur_pos = lseek(fd, 0, SEEK_CUR);
+	file_size = lseek(fd, 0, SEEK_END);
+	lseek(fd, cur_pos, SEEK_CUR);
+	close(fd);
+	return file_size;
+}
 
-// To check for errors in kernel launches, do the following in the cuda code
+unsigned long long log_message (const char* message)
+{
+	const std::chrono::time_point<std::chrono::system_clock> now = std::chrono::system_clock::now();
+	const std::time_t ctimenow_obj = std::chrono::system_clock::to_time_t(now );
+	auto duration = now.time_since_epoch();
+	auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+	struct tm *local = localtime(&ctimenow_obj);
+	std::cout <<  local->tm_hour <<":" << local->tm_min <<":"<< local->tm_sec << " [ " << millis << " ] : " << message << std::endl;
+	return millis;
+}
 
-//kernel<<<1,122222>>>(a);
-//gpuErrchk( cudaPeekAtLastError() ); // or gpuErrchk( cudaGetLastError() );
-//gpuErrchk( cudaDeviceSynchronize() );
-  
+
 #endif
 
 

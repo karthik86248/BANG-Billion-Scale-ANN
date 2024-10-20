@@ -52,15 +52,16 @@ typedef struct __attribute__((__packed__)) _GraphMedatadata
 
 typedef struct _IndexLoad
 {
-	unsigned long long INDEX_ENTRY_LEN ;
+	//unsigned long long INDEX_ENTRY_LEN ;
 	unsigned long long MEDOID ;
 	unsigned uDataType  ;
 	unsigned D  ;
 	unsigned R  ;
 	unsigned N  ;
 	unsigned int uChunks;
-	unsigned medoidID;
+	//unsigned medoidID;
 	uint8_t* pIndex;
+	off_t size_indexfile;
 	unsigned long long ullIndex_Entry_LEN;
 	uint8_t* d_compressedVectors;
 	float *d_pqTable;

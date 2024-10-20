@@ -71,4 +71,7 @@ extern "C" void bang_query_c(uint8_t* query_array,
 					float* nearestNeighbours_dist );
 
 
+void bang_unload();
+
+extern "C" void bang_unload_c( );
 #endif //BANG_H_
