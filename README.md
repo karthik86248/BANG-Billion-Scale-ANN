@@ -33,12 +33,14 @@ Note: For GIST1M, there were only 1000 queries. Therefore 1000 queries were repe
 
 ## Code Build
 
-Run Makefile to build the code.
+TBD.
+For BANG_Base version, refer: (https://github.com/karthik86248/BANG-Billion-Scale-ANN/blob/main/BANG_Base/ReadMe.pdf) 
 ```
 make 
 ```
 
 ## Graph Generation
+For BANG_Base version, refer: (https://github.com/karthik86248/BANG-Billion-Scale-ANN/blob/main/BANG_Base/ReadMe.pdf) 
 * Download the base dataset from the respective dataset repository. The base dataset, query vectors and the groundtruth files.
 * Generate the graph using the *build_disk_index* utility.
 
