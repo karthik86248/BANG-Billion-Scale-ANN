@@ -9,6 +9,8 @@
 #include <assert.h>
 #include <boost/dynamic_bitset.hpp>
 #include <omp.h>
+#include <cuda_runtime.h>
+#include <cub/cub.cuh>
 #include "parANN.h"
 #include "utils/utils.h"
 #include "utils/timer.h"
@@ -20,16 +22,24 @@
 
 #define R 64 // Max. node degree
 
-#define BF_ENTRIES 399887U    	 // per query, max entries in BF, (prime number)
+//#define OLD_MERGE
+
+//#define BF 40009ULL   // size of bloom-filter (per query) with 40009 -> 400 MB
+// 4 GB worth of BF, // we have 4 GB headroom in GPU ,
+// could be varied for varying recall/QPS in plots (apart from L, L is the typically varied for plots)
+#define BF_ENTRIES 399887U //399887U   	 // per query, max entries in BF, (prime number)
 const unsigned BF_MEMORY = (BF_ENTRIES & 0xFFFFFFFC) + sizeof(unsigned); // 4-byte mem aligned size for actual allocation
 
+
+//#define _DBG
+//#define _DBG2
 int nQueryID = 0;
 //#define FREE_AFTERUSE  // Free memory on CPU adn GPU that are no longer required.
 					   // This might impact the performance, as free happens parallel with search
 
 // Indicates MAX iterations performed. IF there is at least one qeuery that requires neighbour seek
 // for a parent, then iteration will occur. There is one initial iteratoion where Medoid is added (outside do-while)
-#define MAX_PARENTS_PERQUERY (L + 100) // Needs to be set with expereince. set it to (2*L) if in doubt
+#define MAX_PARENTS_PERQUERY (4*L+20) // Needs to be set with expereince. set it to (2*L) if in doubt
 
 // length of each entry in INDEX file 128 bytes (FP) + 4 bytes (degree) + 256 bytes (AdjList for R=64)
 // There are N such entries
@@ -73,11 +83,12 @@ unsigned long long log_message (const char* message)
 	auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
 	struct tm *local = localtime(&ctimenow_obj);
 	//printf("Today is %s %s\n", ctime(&ctimenow_obj),message);
-	//cout <<  local->tm_hour <<":" << local->tm_min <<":"<< local->tm_sec << " [ " << millis << " ] : " << message << endl;
+	cout <<  local->tm_hour <<":" << local->tm_min <<":"<< local->tm_sec << " [ " << nanos << " ] : " << message << endl;
 	return nanos;
 }
 
 void parANN(int argc, char** argv) {
+	// the eight i/p files (7 bin + 1 txt)
 	string pqTable_file = string(argv[1]); // Pivot files
 	string compressedVector_file = string(argv[2]);
 	string graphAdjListAndFP_file = string(argv[3]);
@@ -105,7 +116,7 @@ void parANN(int argc, char** argv) {
 		bCacheWarmUp = true;
 
 	unsigned medoidID = MEDOID;
-	unsigned K4_blockSize = 256;
+	//unsigned K4_blockSize = 256;
 
 	cout << medoidID << "\t" << numQueries << endl;
 
@@ -117,11 +128,13 @@ void parANN(int argc, char** argv) {
 		printf("Error.. Could not open the file1..");
 		return;
 	}
+	#if NOTNECESSARY
 	ifstream in2(compressedVector_file, std::ios::binary);
 	if(!in2.is_open()){
 		printf("Error.. Could not open the file2..");
 		return;
 	}
+	#endif
 
 	ifstream in3(graphAdjListAndFP_file, std::ios::binary);
 	if(!in3.is_open()){
@@ -134,6 +147,7 @@ void parANN(int argc, char** argv) {
 		printf("Error.. Could not open the file4..");
 		return;
 	}
+
 
 	// Loading PQTable (binary)
 	float *pqTable = NULL;
@@ -148,6 +162,7 @@ void parANN(int argc, char** argv) {
 	in1.read((char*)pqTable,sizeof(float)*256*D);
 	in1.close();
 
+#if NOTNECESSARY
 	// Loading Compressed Vector (binary)
 	uint8_t * compressedVectors = NULL;
 	compressedVectors = (uint8_t*) malloc(sizeof(uint8_t) * CHUNKS * N);
@@ -158,10 +173,11 @@ void parANN(int argc, char** argv) {
 		return;
 	}
 
+
 	in2.seekg(8);
 	in2.read((char*)compressedVectors, sizeof(uint8_t)*N*CHUNKS);
 	in2.close();
-
+#endif
 	uint8_t* pIndex = NULL;
 	off_t size_indexfile = caclulate_filesize(graphAdjListAndFP_file.c_str());
 
@@ -210,6 +226,7 @@ void parANN(int argc, char** argv) {
 
 
 	// Loading chunk offsets
+
 	unsigned n_chunks = CHUNKS;
 	unsigned *chunksOffset = (unsigned*) malloc(sizeof(unsigned) * (n_chunks+1));
 	uint64_t numr = n_chunks + 1;
@@ -268,6 +285,7 @@ void parANN(int argc, char** argv) {
 	bool *d_BestLSets_visited = NULL;
 	bool *d_merged_visited = NULL;
 	bool *d_nextIter = NULL;
+	// ToDo : Check if we can avoid work at bool granularity and at bit level
 	bool *d_processed_bit_vec = NULL;
 	unsigned* d_numQueries = NULL;
 	// 2D array format
@@ -320,10 +338,8 @@ void parANN(int argc, char** argv) {
 	vector<vector<unsigned>> final_bestL1;	// Per query vector to store the visited parent and its distance to query point
 	final_bestL1.resize(numQueries);
 
-	// Experimentation with using Shared Meory for PQDist tables (no latency improvement observed)
-
 	// Allocations on GPU
-	gpuErrchk(cudaMalloc(&d_compressedVectors, sizeof(uint8_t) * N * CHUNKS)); 	//100M*100 ~10GB
+	//gpuErrchk(cudaMalloc(&d_compressedVectors, sizeof(uint8_t) * N * CHUNKS)); 	//100M*100 ~10GB
 	gpuErrchk(cudaMalloc(&d_processed_bit_vec, sizeof(bool)*BF_MEMORY*numQueries));
 	gpuErrchk(cudaMalloc(&d_nextIter, sizeof(bool)));
 	gpuErrchk(cudaMalloc(&d_iter, sizeof(unsigned)));
@@ -392,14 +408,12 @@ void parANN(int argc, char** argv) {
 
 	// host to device transfer
 	gpuErrchk(cudaMemcpy(d_pqTable, pqTable_T, sizeof(float) * (256*D), cudaMemcpyHostToDevice));
-	gpuErrchk(cudaMemcpy(d_compressedVectors, compressedVectors, (unsigned long long)(sizeof(uint8_t) * (unsigned long long)(CHUNKS)*N),
-	cudaMemcpyHostToDevice));
+	//gpuErrchk(cudaMemcpy(d_compressedVectors, compressedVectors, (unsigned long long)(sizeof(uint8_t) * (unsigned long long)(CHUNKS)*N),cudaMemcpyHostToDevice));
 	gpuErrchk(cudaMemcpy(d_chunksOffset, chunksOffset, sizeof(unsigned) * (n_chunks+1), cudaMemcpyHostToDevice));
 	gpuErrchk(cudaMemcpy(d_pIndex, pIndex, size_indexfile, cudaMemcpyHostToDevice));
 
 	// There are 3 stages for free'ing: 1) After transferring to Device (i.e. before search) 2) After the iterations and 3) Before termination
 #ifdef FREE_AFTERUSE
-
 	free(compressedVectors);
 	compressedVectors = NULL;
 	free(pqTable_T);
@@ -461,7 +475,7 @@ do // this is just to run the entire search multiple runs for consistent stats r
 
 	omp_set_num_threads(numCPUthreads);
 
-	auto nanoStart = log_message("SEARCH STARTED");
+	auto nanoStart = log_message("SEARCH STARTED1");
 	auto start = std::chrono::high_resolution_clock::now();
 	gpuErrchk(cudaMemcpy(d_queriesFP, queriesFP, sizeof(datatype_t) * (D*numQueries), cudaMemcpyHostToDevice));
 	auto stop = std::chrono::high_resolution_clock::now();
@@ -488,6 +502,7 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	time_B1_vec.push_back(gputimer.Elapsed());
 
 	gputimer.Start();
+#ifdef OLD_MERGE
 	/** [8] Launching the kernel with "numQueries" number of thread-blocks and (R+1) block size.
 	 * One thread block is assigned to a query, i.e., (R+1) threads perform the computation for a query.
 	 * The kernel  sorts an array of size (R+1) per query, so we do not require (R+1) threads per query.
@@ -503,6 +518,7 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	 * One thread block is assigned to a query, i.e., (2*L) threads perform the computation for a query.
 	 * The kernel merges, for every query, two arrays each of whose sizes are upperbounded by L, so we do not require more than 2*L threads per query.
 	 */
+
 	compute_BestLSets_par_merge<<<numQueries, numThreads_K3_merge,0, streamKernels >>>(d_neighbors,
 									d_numNeighbors_query,
 									d_neighborsDist_query,
@@ -516,12 +532,34 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	 								d_L2ParentIds,
 	 								d_FPSetCoordsList_Counts,
 	 								d_numQueries);
+#else
+
+	compute_BestLSets_par_sort_msort_new<<<numQueries, max(numThreads_K3,numThreads_K3_merge),0, streamKernels >>>(d_neighbors,
+															//d_neighbors_aux,
+															d_numNeighbors_query,
+															d_neighborsDist_query,
+															//d_neighborsDist_query_aux,
+															d_BestLSets,
+															d_BestLSetsDist,
+															d_BestLSets_visited,
+															d_parents,
+															iter,
+															d_nextIter,
+															d_BestLSets_count,
+															d_L2ParentIds,
+															d_FPSetCoordsList_Counts,
+															d_numQueries);
+
+
+
+#endif
 	gputimer.Stop();
 	time_B2_vec.push_back(gputimer.Elapsed());
 
 	// Loop until all the query have no new parent
 	do
 	{
+		//printf("Start of iter %d\n", iter);
 		gputimer.Start();
 
 		++iter;
@@ -548,7 +586,10 @@ do // this is just to run the entire search multiple runs for consistent stats r
 		gputimer.Stop();
 		time_B1_vec.push_back(gputimer.Elapsed());
 
+
 		gputimer.Start();
+
+#ifdef OLD_MERGE
 		/** [8] Launching the kernel with "numQueries" number of thread-blocks and (R+1) block size.
 		 * One thread block is assigned to a query, i.e., (R+1) threads perform the computation for a query.
 		 * The kernel  sorts an array of size (R+1) per query, so we do not require (R+1) threads per query.
@@ -577,10 +618,31 @@ do // this is just to run the entire search multiple runs for consistent stats r
 		 								d_L2ParentIds,
 		 								d_FPSetCoordsList_Counts,
 		 								d_numQueries);
+#else
+		compute_BestLSets_par_sort_msort_new<<<numQueries, max(numThreads_K3,numThreads_K3_merge),0, streamKernels >>>(d_neighbors,
+															//d_neighbors_aux,
+															d_numNeighbors_query,
+															d_neighborsDist_query,
+															//d_neighborsDist_query_aux,
+															d_BestLSets,
+															d_BestLSetsDist,
+															d_BestLSets_visited,
+															d_parents,
+															iter,
+															d_nextIter,
+															d_BestLSets_count,
+															d_L2ParentIds,
+															d_FPSetCoordsList_Counts,
+															d_numQueries
+															);
+
+
+#endif
+
 		gputimer.Stop();
 		time_B2_vec.push_back(gputimer.Elapsed());
 
-
+		//printf("here\n%d\n",nextIter);
 		start = std::chrono::high_resolution_clock::now();
 
 		gpuErrchk(cudaMemcpy(&nextIter, d_nextIter, sizeof(bool), cudaMemcpyDeviceToHost));  //d_nextIter calculated in compute_parent<<< >>>
@@ -588,16 +650,21 @@ do // this is just to run the entire search multiple runs for consistent stats r
 		// Hence, the above call could act as a synchronization mechanism to ensure all kernels are done (next parent ready)
 		// before we start seeking neighbours on CPU
 
+	        // printf("Iteration = %d\n", iter);
+
+
 		stop = std::chrono::high_resolution_clock::now();
 		time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
 
-		#ifdef _DBG
+		//#ifdef _DBG
 		if (iter == MAX_PARENTS_PERQUERY-1)
 		{
 			printf("Error: Iterations crossed the assumed limit. FPSetCoords size oversun \n");
 			break;
 		}
-		#endif
+		//#endif
+
+		//printf("end of iter %d\n", iter);
 	}
 	while(nextIter);
 
@@ -645,9 +712,14 @@ do // this is just to run the entire search multiple runs for consistent stats r
 
 #endif // #if FREE_AFTERUSE
 
+
+//	gputimer.Stop();
+//	time_transfer += gputimer.Elapsed();
+
 	// re-rnking start
 
 	gputimer.Start();
+#if NOTNECESSARY
 	cudaStreamSynchronize(streamFPTransfers);
 	compute_L2Dist<<<numQueries, K4_blockSize >>> (d_FPSetCoordsList,
 												d_FPSetCoordsList_Counts,
@@ -680,6 +752,7 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	}
 
 #endif
+#endif
 	compute_NearestNeighbours<<<numQueries, MAX_PARENTS_PERQUERY >>> (d_L2ParentIds,
 												d_L2ParentIds_aux,
 												d_FPSetCoordsList_Counts,
@@ -687,7 +760,8 @@ do // this is just to run the entire search multiple runs for consistent stats r
 												d_L2distances_aux,
 												d_nearestNeighbours,
 												d_numQueries,
-												d_recall);
+												d_recall,
+												d_BestLSets);
 
 
 
@@ -705,14 +779,16 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	gpuErrchk(cudaMemcpy(pTempNumParents, d_FPSetCoordsList_Counts, sizeof(unsigned) * numQueries,
 	cudaMemcpyDeviceToHost));
 
+	// print parentIDs and distances for Query
+
 	printf ("After Sorting\n");
 	for (int i=0; i< pTempNumParents[nQueryID]; i++ )
 	{
 		printf("nQueryID = %d Parent = %d \t distance = %d\n", nQueryID, pTempParents[(numQueries*i) + nQueryID ], pTempDists[(numQueries*i) + nQueryID ] );
 	}
 
-#endif
 
+#endif
 	gputimer.Stop();
 
 
@@ -744,6 +820,7 @@ do // this is just to run the entire search multiple runs for consistent stats r
 			#pragma omp critical
 			{
 				final_bestL1[ii] = query_best;
+//				printf("final_bestL1[%d] size = %lu \n", ii, final_bestL1[ii].size());
 			}
 		}
 	}
@@ -775,8 +852,8 @@ do // this is just to run the entire search multiple runs for consistent stats r
 
 	assert(time_B1_vec.size() >= 1);
 	float time_B1_avg = time_B1_vec[0];
-	time_B1 = time_B1_avg;
-	for(unsigned idx=1; idx<time_B1_vec.size(); ++idx) {
+	time_B1 = time_B1_avg ;
+ 	for(unsigned idx=1; idx<time_B1_vec.size(); ++idx) {
 		time_B1_avg = time_B1_avg + (time_B1_vec[idx] - time_B1_avg)/(idx+1); // running average
 		time_B1 += time_B1_vec[idx];
 	}
@@ -811,7 +888,6 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	cout << "Throughput = " << throughput << " QPS" << endl;
 	cout << "Throughput (Exclude Mem Transfers) = " << (numQueries * 1000.0) / ((totalTime_wallclock/1000.0) - time_transfer / 1000.0) << " QPS" << endl;
 
-
 	// Computing the recall
 
 	unsigned*         gt_ids = nullptr;
@@ -844,15 +920,16 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	std::vector<std::vector<unsigned> > query_result_ids(Lvec.size());
 
 	unsigned total_size=0;
-#ifdef _DBG
-	FPSetCoordsList_Counts = (unsigned*)malloc(sizeof(unsigned) * numQueries);
 
-	gpuErrchk(cudaMemcpy(FPSetCoordsList_Counts, d_FPSetCoordsList_Counts, sizeof(unsigned) * numQueries, cudaMemcpyDeviceToHost ));
+#ifdef _DBG2
+	unsigned int *  FPSetCoordsList_Counts_tmp = (unsigned*)malloc(sizeof(unsigned) * numQueries);
+
+	gpuErrchk(cudaMemcpy(FPSetCoordsList_Counts_tmp, d_FPSetCoordsList_Counts, sizeof(unsigned) * numQueries, cudaMemcpyDeviceToHost ));
 	for (int i=0; i< numQueries; i++)
 	{
-		total_size += FPSetCoordsList_Counts[i];
+		total_size += FPSetCoordsList_Counts_tmp[i];
 	}
-	free(FPSetCoordsList_Counts);
+	free(FPSetCoordsList_Counts_tmp);
 #endif
 	for (unsigned test_id = 0; test_id < Lvec.size(); test_id++) {
 		unsigned L1 = Lvec[test_id];
@@ -929,35 +1006,43 @@ __global__ void neighbor_filtering_new (unsigned* d_neighbors,
 	unsigned offset_neighbors = queryID * (R+1); //Offset into d_neighbors_temp array
 	unsigned offset_bit_vec = queryID*BF_MEMORY;	//Offset into d_processed_bit_vec vector of bloom filter
 	bool* d_processed_bit_vec_start = d_processed_bit_vec + offset_bit_vec;
-	unsigned parentID;
+	unsigned long long parentID;
 
 	if(iter==1){
 		// If this is first iteration, set the bits corresponding to MEDOID so that its not taken as parent in next iteration
 		parentID = MEDOID;
 		if(tid==0){
-			if(!((d_processed_bit_vec_start[hashFn1_d(MEDOID)]) && (d_processed_bit_vec_start[hashFn2_d(MEDOID)]))) {
+			if(!((d_processed_bit_vec_start[hashFn1_d(MEDOID)])
+			//&&
+			//(d_processed_bit_vec_start[hashFn2_d(MEDOID)])
+			)
+			) {
 				d_processed_bit_vec_start[hashFn1_d(MEDOID)] = true;
-				d_processed_bit_vec_start[hashFn2_d(MEDOID)] = true;
+				//d_processed_bit_vec_start[hashFn2_d(MEDOID)] = true;
 				unsigned old = atomicAdd(&d_numNeighbors_query[queryID], 1);
 				d_neighbors[offset_neighbors + old] = MEDOID;
 			}
 		}
 	}
+
 	else parentID = d_parents[queryID*(SIZEPARENTLIST)+1];
 
-	unsigned* bound = (unsigned*)(d_pIndex + (INDEX_ENTRY_LEN*parentID) + D*sizeof(datatype_t));
+	unsigned* bound = (unsigned*)(d_pIndex + ((unsigned long long)INDEX_ENTRY_LEN*parentID) + D*sizeof(datatype_t));
 	// For each neighbor of current parent in d_graph array check if its corresponding bits in the d_processed_bit_vec are already set
 	for(unsigned ii=tid; ii < *bound; ii += blockDim.x ) {
 		unsigned nbr = *(bound+1+ii);
-		if(!((d_processed_bit_vec_start[hashFn1_d(nbr)]) && (d_processed_bit_vec_start[hashFn2_d(nbr)]))) {
+		if(!((d_processed_bit_vec_start[hashFn1_d(nbr)])
+		//&&
+		//(d_processed_bit_vec_start[hashFn2_d(nbr)])
+		)) {
 			d_processed_bit_vec_start[hashFn1_d(nbr)] = true;
-			d_processed_bit_vec_start[hashFn2_d(nbr)] = true;
+			//d_processed_bit_vec_start[hashFn2_d(nbr)] = true;
 			unsigned old = atomicAdd(&d_numNeighbors_query[queryID], 1);
 			d_neighbors[offset_neighbors + old] = nbr;
 		}
 	}
+	//__syncthreads();
 
-	__syncthreads();
 
 }
 
@@ -1029,29 +1114,42 @@ __global__ void  compute_neighborDist_par_cachewarmup(unsigned* d_neighbors,
 __global__ void  compute_neighborDist_par(unsigned* d_neighbors,
 											unsigned* d_numNeighbors_query,
 											float*  d_neighborsDist_query,
-											float* d_queriesFP,
+											datatype_t* d_queriesFP,
 											uint8_t* d_pIndex) {
 
 	unsigned tid = threadIdx.x;
 	unsigned queryID = blockIdx.x;
+	//__shared__ unsigned shm_neighbours[R+1];
 
 	unsigned numNeighbors = d_numNeighbors_query[queryID];
 	unsigned queryNeighbors_start  = queryID * (R+1);	// offset into d_neighbors array
+	float* d_neighborsDist_query_start = d_neighborsDist_query + queryNeighbors_start;
+	datatype_t* d_queriesFP_start = d_queriesFP+(queryID*D);
 
-	for(unsigned uIter = tid; uIter < numNeighbors; uIter += blockDim.x)
-		d_neighborsDist_query[queryNeighbors_start + uIter] = 0;
+/*
+	for(unsigned uIter = tid; uIter < numNeighbors; uIter += blockDim.x){
+		d_neighborsDist_query_start[ uIter] = 0.0;
+		//shm_neighbours[uIter] = d_neighbors[queryNeighbors_start + uIter];
+	}*/
+	//__syncthreads();
 
-	__syncthreads();
-	//blockDim.x need to be multiple of 8
-	for( unsigned j = tid/8; j < numNeighbors; j += (blockDim.x+7)/8 ) { // assign eight threads to a neighbor, within a query
-		unsigned long long myNeighbor = d_neighbors[queryNeighbors_start + j];
-		datatype_t* pBase = (datatype_t*)(d_pIndex+myNeighbor*INDEX_ENTRY_LEN);
+	//	__syncthreads();
+	#define THREADS_PER_NEIGHBOR 8
+	typedef cub::WarpReduce<float,THREADS_PER_NEIGHBOR> WarpReduce;
+	__shared__ typename WarpReduce::TempStorage temp_storage[R];
+
+	//blockDim.x need to be multiple of THREADS_PER_NEIGHBOR
+	for( unsigned j = tid/THREADS_PER_NEIGHBOR; j < numNeighbors; j += (blockDim.x)/THREADS_PER_NEIGHBOR ) { // assign eight threads to a neighbor, within a query
+		unsigned long long myNeighbor = d_neighbors[ queryNeighbors_start + j];
+
+		datatype_t* pBase = (datatype_t*)(d_pIndex+(myNeighbor*INDEX_ENTRY_LEN));
 		float sum = 0.0f;
-		for(unsigned i = tid%8; i < D; i += 8 ){
-			float diff = (float)(*(pBase+i)) - d_queriesFP[queryID*D+i];	// d_quriesFP must contain float
+		for(unsigned i = tid%THREADS_PER_NEIGHBOR; i < D; i +=  THREADS_PER_NEIGHBOR){
+			float diff = (float)(*(pBase+i)) - (float)d_queriesFP_start[i];	// d_quriesFP must contain float
 			sum += diff*diff;	// Parallel execution
 		}
-		atomicAdd(&d_neighborsDist_query[queryNeighbors_start + j], sum);
+		d_neighborsDist_query_start[j] = WarpReduce(temp_storage[j]).Sum(sum);
+		//atomicAdd(&d_neighborsDist_query[queryNeighbors_start + j], sum);
 	}
 }
 
@@ -1082,10 +1180,10 @@ __global__ void compute_L2Dist (datatype_t* d_FPSetCoordsList,
 
 	// one thread block computes the distances of all the nodes for a query,
 	for(unsigned ii = tid; ii < numNodes; ii += blockDim.x) {
-		datatype_t* pBase = (datatype_t*)(d_pIndex + d_L2ParentIds[numQueries*ii + queryID]*INDEX_ENTRY_LEN);
+		datatype_t* pBase = (datatype_t*)(d_pIndex + (unsigned long long)d_L2ParentIds[numQueries*ii + queryID]*INDEX_ENTRY_LEN);
 		float L2Dist = 0.0;
 		for(unsigned jj=0;jj < D; ++jj) {
-			float diff = (float)(*(pBase+jj)) - query_vec[jj];
+			float diff = (float)(*(pBase+jj)) - (float)query_vec[jj];
 			L2Dist = L2Dist + (diff * diff);
 		}
 		d_L2distances[( numQueries * ii) + queryID ] = L2Dist;
@@ -1099,10 +1197,12 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 						float* d_L2distances_aux,
 						unsigned* d_nearestNeighbours,
 						unsigned* d_numQueries,
-						unsigned* d_recall)
+						unsigned* d_recall,
+						unsigned* d_BestLSets)
 {
     unsigned tid = threadIdx.x;
     unsigned queryID = blockIdx.x;
+	#if NOTNCESSARY
     unsigned numNeighbors = d_FPSetCoordsList_Counts[queryID];
 
     if(tid >= numNeighbors || numNeighbors <= 0) return;
@@ -1144,9 +1244,10 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 		}
 		__syncthreads();
 	}
+	#endif
 	for(unsigned ii = tid; ii < *d_recall; ii += blockDim.x)
 	{
-		d_nearestNeighbours[( (*d_numQueries) * ii) + queryID ] = d_L2ParentIds[( (*d_numQueries) * ii) + queryID ];
+		d_nearestNeighbours[( (*d_numQueries) * ii) + queryID ] = d_BestLSets[( (L) * queryID) + ii ];
 	}
 }
 
@@ -1162,11 +1263,12 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
  * @param d_nextIter This maintains boolean flags for all queries, to decide if a query is to processed in the next iteration.
  * @param beamWidth This is the beamwidth.
  */
+#ifdef OLD_MERGE
 __global__ void  compute_BestLSets_par_sort_msort(unsigned* d_neighbors,
-													unsigned* d_neighbors_aux,
+													unsigned* d_neighbors_aux1,
 													unsigned* d_numNeighbors_query,
 													float* d_neighborsDist_query,
-													float* d_neighborsDist_query_aux,
+													float* d_neighborsDist_query_aux1,
 													bool* d_nextIter) {
 
 
@@ -1175,9 +1277,12 @@ __global__ void  compute_BestLSets_par_sort_msort(unsigned* d_neighbors,
     unsigned numNeighbors = d_numNeighbors_query[queryID];
     *d_nextIter = false;
 
-    if(tid >= numNeighbors || numNeighbors <= 0) return;
+   if(tid >= numNeighbors || numNeighbors <= 0) return;
 
     __shared__ unsigned shm_pos[R+1];
+	__shared__ unsigned shm_neighbors_aux[R+1];
+	__shared__ unsigned shm_neighborsDist_query_aux[R+1];
+
     unsigned offset = queryID*(R+1);	// Offset into d_neighborsDist_query, d_neighborsDist_query_aux, d_neighbors_aux and d_neighbors arrays
 
 	// perform parallel merge sort
@@ -1202,20 +1307,18 @@ __global__ void  compute_BestLSets_par_sort_msort(unsigned* d_neighbors,
 
 		// Copy the neighbors to auxiliary array at their correct position
 		for(int i=tid; i < numNeighbors; i += blockDim.x) {
-			d_neighborsDist_query_aux[offset + shm_pos[i]] = d_neighborsDist_query[offset+i];
-			d_neighbors_aux[offset + shm_pos[i]] = d_neighbors[offset+i];
+			shm_neighborsDist_query_aux[shm_pos[i]] = d_neighborsDist_query[offset+i];
+			shm_neighbors_aux[ shm_pos[i]] = d_neighbors[offset+i];
 		}
 		__syncthreads();
 		// Copy the auxiliary array to original array
 		for(int i=tid; i < numNeighbors; i += blockDim.x) {
-			d_neighborsDist_query[offset + i] = d_neighborsDist_query_aux[offset+i];
-			d_neighbors[offset + i] = d_neighbors_aux[offset+i];
+			d_neighborsDist_query[offset + i] = shm_neighborsDist_query_aux[i];
+			d_neighbors[offset + i] = shm_neighbors_aux[i];
 		}
 		__syncthreads();
 	}
 }
-
-
 
 
 /** This kernel merges the current Best_L_Set (candidate set) with the list of sorted neighbors (in d_neighbors) to update the candidate
@@ -1344,8 +1447,6 @@ __global__ void  compute_BestLSets_par_merge(unsigned* d_neighbors,
                 __threadfence_block();
         }
 	}
-
-
 	if(tid == 0) {
 			unsigned parentIndex = 0;
 			for(unsigned ii=0; ii < newBest_L_Set_size; ++ii) {
@@ -1363,13 +1464,214 @@ __global__ void  compute_BestLSets_par_merge(unsigned* d_neighbors,
 					*d_nextIter = true;
 					// Note: One thread assigned to one Query, so ok to increment (no contention)
 					d_FPSetCoordsList_Counts[queryID]++;
+					// ToDo : Ensure to put MEDOID as the first parent
 					d_L2ParentIds[(iter * numQueries) + queryID] = d_parents[queryID*(SIZEPARENTLIST)+parentIndex];
 				}
 	}
 
 }
+#else
+
+__global__ void  compute_BestLSets_par_sort_msort_new(unsigned* d_neighbors,
+													//unsigned* d_neighbors_aux,
+													unsigned* d_numNeighbors_query,
+													float* d_neighborsDist_query,
+													//float* d_neighborsDist_query_aux,
+													unsigned* d_BestLSets,
+													float* d_BestLSetsDist,
+													bool* d_BestLSets_visited,
+													unsigned* d_parents,
+													unsigned iter,
+													bool* d_nextIter,
+													unsigned* d_BestLSets_count,
+													unsigned* d_L2ParentIds,
+													unsigned* d_FPSetCoordsList_Counts,
+													unsigned* d_numQueries
+													) {
+	unsigned tid = threadIdx.x;
+    unsigned queryID = blockIdx.x;
+    unsigned numNeighbors = d_numNeighbors_query[queryID];
+    *d_nextIter = false;
+
+    __shared__ unsigned shm_pos[R+1];
+    unsigned offset = queryID*(R+1);	// Offset into d_neighborsDist_query, shm_neighborsDist_query_aux, d_neighbors_aux and d_neighbors arrays
+
+	__shared__ float shm_neighborsDist_query_aux[R+1];
+	__shared__ unsigned shm_neighbors_aux[R+1];
 
 
+	__shared__ float shm_neighborsDist_query[R]; // R+1 is an upperbound on the number of neighbors
+	__shared__ float shm_currBestLSetsDist[L];
+	__shared__ float shm_BestLSetsDist[L];
+	__shared__ unsigned shm_pos1[R+L+1];
+	__shared__ unsigned shm_BestLSets[L];
+	__shared__ bool shm_BestLSets_visited[L];
+	__shared__ unsigned Temp;
+
+	// perform parallel merge sort
+	for(unsigned subArraySize=2; subArraySize< 2*numNeighbors; subArraySize *= 2){
+		unsigned subArrayID = tid/subArraySize;
+		unsigned start = subArrayID * subArraySize;
+		unsigned mid = min(start + subArraySize/2, numNeighbors);
+		unsigned end = min(start + subArraySize, numNeighbors);
+
+		if(tid >= start && tid < mid){
+			unsigned lowerBound = lower_bound_d(&d_neighborsDist_query[offset + mid], 0, end-mid, d_neighborsDist_query[offset + tid]);
+			shm_pos[tid] = lowerBound + tid;	// Position for this element
+		}
+
+		if(tid >= mid && tid < end)  {
+			unsigned upperBound = upper_bound_d(&d_neighborsDist_query[offset + start], 0, mid-start, d_neighborsDist_query[offset + tid]);
+			shm_pos[tid] = start + (upperBound + tid-mid);	// Position for this element
+
+		}
+		__syncthreads();
+		__threadfence_block();
+
+		// Copy the neighbors to auxiliary array at their correct position
+		for(int i=tid; i < numNeighbors; i += blockDim.x) {
+			shm_neighborsDist_query_aux[ shm_pos[i]] = d_neighborsDist_query[offset+i];
+			shm_neighbors_aux[shm_pos[i]] = d_neighbors[offset+i];
+		}
+		__syncthreads();
+		#if 1
+		// Copy the auxiliary array to original array
+		for(int i=tid; i < numNeighbors; i += blockDim.x) {
+			d_neighborsDist_query[offset + i] = shm_neighborsDist_query_aux[i];
+			d_neighbors[offset + i] = shm_neighbors_aux[i];
+		}
+		__syncthreads();
+		#endif
+	}
+	//}
+	//{
+	__syncthreads();
+	#if 1
+	for(int i=tid; i < numNeighbors; i += blockDim.x) {
+			shm_neighborsDist_query_aux[i] = d_neighborsDist_query[offset + i];
+			shm_neighbors_aux[i] = d_neighbors[offset + i];
+		}
+	__syncthreads();
+	//unsigned queryID = blockIdx.x;
+	//unsigned numNeighbors = d_numNeighbors_query[queryID];
+	//unsigned tid = threadIdx.x;
+
+	 unsigned Best_L_Set_size  ;// = 0;
+	 unsigned newBest_L_Set_size ; //= d_BestLSets_count[queryID];
+	 __shared__ unsigned nbrsBound;
+	//unsigned offset = queryID*(R+1);
+	//unsigned numQueries = *d_numQueries;
+
+
+	if(numNeighbors > 0){	// If the number of neighbors after filteration is zero then no sense of merging
+
+        if(iter==1){	// If this is the first call to compute_BestLSets_par_merge by this query then initialize d_BestLSets, d_BestLSetsDist...
+                nbrsBound = min(numNeighbors,L);
+                for(unsigned ii=tid; ii < nbrsBound; ii += blockDim.x) {
+                        unsigned nbr =  shm_neighbors_aux[ ii];
+                        d_BestLSets[queryID*L + tid] = nbr;
+                        d_BestLSetsDist[queryID*L + tid] =   shm_neighborsDist_query_aux[ ii];
+                        d_BestLSets_visited[queryID*L + tid] = ( nbr == MEDOID);
+                }
+                __syncthreads();
+                newBest_L_Set_size = nbrsBound;
+                d_BestLSets_count[queryID] = nbrsBound;
+        }
+        else {
+                Best_L_Set_size = d_BestLSets_count[queryID];
+
+                float maxBestLSetDist = d_BestLSetsDist[L*queryID+Best_L_Set_size-1];
+				Temp = min(L,numNeighbors);
+				if (tid == 0) {
+                for(nbrsBound = 0; nbrsBound < Temp ; ++nbrsBound) {
+                        if(shm_neighborsDist_query_aux[ nbrsBound] >= maxBestLSetDist){
+                                break;
+                        }
+                }
+				}
+				__syncthreads();
+
+                nbrsBound = max(nbrsBound, min(L-Best_L_Set_size, numNeighbors));	//Added by saim
+                // if both Best_L_Set_size and numNeighbors is less than L, then the max of the two will be the newBest_L_Set_size otherwise it will be L
+                newBest_L_Set_size = min(Best_L_Set_size + nbrsBound, L);			//Updated by saim
+
+                d_BestLSets_count[queryID] = newBest_L_Set_size;
+
+
+			/*perform parallel merge */
+               /* for(int i=tid; i < nbrsBound; i += blockDim.x) {
+                        shm_neighborsDist_query[i] = shm_neighborsDist_query_aux[ i];
+                }*/
+                for(int i=tid; i < Best_L_Set_size; i += blockDim.x) {
+                        shm_currBestLSetsDist[i] = d_BestLSetsDist[L*queryID+i];
+                }
+                __syncthreads();
+                if(tid < nbrsBound) {
+                        shm_pos1[tid] =  lower_bound_d(shm_currBestLSetsDist, 0, Best_L_Set_size, shm_neighborsDist_query_aux[tid]) + tid;
+                }
+                if( tid >= nbrsBound && tid < (nbrsBound + Best_L_Set_size)) {
+                        shm_pos1[tid] =  upper_bound_d(shm_neighborsDist_query_aux, 0, nbrsBound, shm_currBestLSetsDist[tid-nbrsBound]) + (tid-nbrsBound);
+                }
+
+                __syncthreads();
+                __threadfence_block();
+
+                // all threads of the block have populated the positions array in shared memory
+                if(tid < nbrsBound && shm_pos1[tid] < newBest_L_Set_size)  {
+                        shm_BestLSetsDist[shm_pos1[tid]] = shm_neighborsDist_query_aux[tid];
+                        shm_BestLSets[shm_pos1[tid]] = shm_neighbors_aux[tid];
+                        shm_BestLSets_visited[shm_pos1[tid]] = false;
+                }
+				Temp = (nbrsBound + Best_L_Set_size);
+                if(tid >= nbrsBound && tid < (Temp) && shm_pos1[tid] < newBest_L_Set_size) {
+                        shm_BestLSetsDist[shm_pos1[tid]] = shm_currBestLSetsDist[tid-nbrsBound];
+                        shm_BestLSets[shm_pos1[tid]] = d_BestLSets[queryID*L+(tid-nbrsBound)];
+                        shm_BestLSets_visited[shm_pos1[tid]] = d_BestLSets_visited[queryID*L+(tid-nbrsBound)];
+                }
+                __syncthreads();
+                __threadfence_block();
+
+                //Copying back from shared memory to device array
+                if (tid < newBest_L_Set_size) {
+                        d_BestLSetsDist[L*queryID+tid] = shm_BestLSetsDist[tid];
+                        d_BestLSets[L*queryID+tid] = shm_BestLSets[tid];
+                        d_BestLSets_visited[L*queryID+tid] = shm_BestLSets_visited[tid];
+                    }
+                __syncthreads();
+                //__threadfence_block();
+        }
+	}
+
+	if(tid == 0) {
+			unsigned parentIndex = 0;
+			for(unsigned ii=0; ii < newBest_L_Set_size; ++ii) {
+				if(!d_BestLSets_visited[L*queryID + ii])
+				{
+					parentIndex++;
+					d_BestLSets_visited[L*queryID + ii] = true;
+					d_parents[queryID*(SIZEPARENTLIST)] = parentIndex;
+					d_parents[queryID*(SIZEPARENTLIST)+parentIndex] = d_BestLSets[L*queryID + ii];
+					*d_nextIter = true;
+					break;
+				}
+			}
+			#if 0
+			d_parents[queryID*(SIZEPARENTLIST)] = parentIndex;
+			if(parentIndex != 0) // parentIndex == 0 is the termination condition for the algorithm.
+				{
+					*d_nextIter = true;
+					// Note: One thread assigned to one Query, so ok to increment (no contention)
+					//d_FPSetCoordsList_Counts[queryID]++;
+					// ToDo : Ensure to put MEDOID as the first parent
+					//d_L2ParentIds[(iter * numQueries) + queryID] = d_parents[queryID*(SIZEPARENTLIST)+parentIndex];
+				}
+			#endif
+	}
+#endif
+}
+
+
+#endif
 
 /*Helper device function which returns the position first element in the range [lo,hi), which has a value not less than 'target'.*/
 __device__ unsigned lower_bound_d(float arr[], unsigned lo, unsigned hi, float target) {
@@ -1440,4 +1742,6 @@ __device__ unsigned upper_bound_d_ex(float arr[], unsigned lo, unsigned hi, floa
 
 	return lo;
 }
+
+
 
