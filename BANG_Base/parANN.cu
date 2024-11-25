@@ -219,8 +219,6 @@ void bang_load(char* indexfile_path_prefix)
 	free(compressedVectors);
 	compressedVectors = NULL;
 	RAFT_LOG_INFO("Transferring Compressed vectors done\n");
-	sleep(10);
-
 
 	uint8_t* pIndex = NULL;
 	off_t size_indexfile = caclulate_filesize(graphAdjListAndFP_file.c_str());
@@ -480,25 +478,25 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 	auto d_iter = raft::make_device_scalar<uint32_t>(handle, 0);
 	gpuErrchk(cudaMemsetAsync(d_iter,0,sizeof(unsigned), handle.get_stream()));
 
-	gpuErrchk(cudaMalloc(&d_pqDistTables, sizeof(float) * (256*objIndexLoad.uChunks*numQueries)));
+	auto d_pqDistTables = raft::make_device_matrix<float>(handle, 256, objIndexLoad.uChunks*numQueries);
 
-	gpuErrchk(cudaMalloc(&d_queriesFP, sizeof(T) * (numQueries*D)));
+	auto d_queriesFP = raft::make_device_matrix<T>(handle, numQueries, D);
 	
-	gpuErrchk(cudaMalloc(&d_neighbors_aux, sizeof(unsigned) * (numQueries*(R+1))));
-	gpuErrchk(cudaMalloc(&d_numNeighbors_query, sizeof(unsigned) * (numQueries)));
+	auto d_neighbors_aux = raft::make_device_matrix<uint32_t>(handle, numQueries, (R+1));
+	auto d_numNeighbors_query = raft::make_device_vector<uint32_t>(handle, numQueries);
 
-	gpuErrchk(cudaMalloc(&d_neighborsDist_query, sizeof(float) * (numQueries*(R+1))));
-	gpuErrchk(cudaMalloc(&d_neighborsDist_query_aux, sizeof(float) * (numQueries*(R+1))));
+	auto d_neighborsDist_query = raft::make_device_matrix<float>(handle, numQueries, (R+1));
+	auto d_neighborsDist_query_aux = raft::make_device_matrix<float>(numQueries, (R+1));
 
 	
-	gpuErrchk(cudaMalloc(&d_parents, sizeof(unsigned) * (numQueries*(SIZEPARENTLIST))));
-	gpuErrchk(cudaMalloc(&d_neighbors, sizeof(unsigned) * (numQueries*(R+1))));
-	gpuErrchk(cudaMalloc(&d_neighbors_temp, sizeof(unsigned) * (numQueries*(R+1))));
-	gpuErrchk(cudaMalloc(&d_numNeighbors_query_temp, sizeof(unsigned) * (numQueries)));
+	auto d_parents = raft::make_device_matrix<uint32_t>(handle, numQueries, SIZEPARENTLIST);
+	auto d_neighbors = raft::make_device_matrix<uint32_t>(handle, numQueries, (R+1));
+	auto d_neighbors_temp = raft::make_device_matrix<uint32_t>(handle, numQueries, (R+1));
+	auto d_numNeighbors_query_temp = raft::make_device_vector<uint32_t>(handle, numQueries);
 
 
-	gpuErrchk(cudaMalloc(&d_BestLSets_count, sizeof(unsigned) * (numQueries)));
-	gpuErrchk(cudaMalloc(&d_mark, sizeof(unsigned) * (numQueries)));			// ~40KB
+	auto d_BestLSets_count = raft::make_device_vector<uint32_t>(numQueries);
+	auto d_mark = raft::make_device_vector<uint32_t>(numQueries);			// ~40KB
 
 
 	gpuErrchk(cudaMalloc(&d_FPSetCoordsList_Counts, numQueries * sizeof(unsigned) ));
@@ -539,10 +537,10 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 
 	assert ( uMAX_PARENTS_PERQUERY <= MAX_PARENTS_PERQUERY);
 	auto FPSetCoordsList = raft::make_pinned_vector<T>(uMAX_PARENTS_PERQUERY * numQueries * FPSetCoords_size_bytes);
-	auto d_FPSetCoordsList = raft::make_device_vector<T>(FPSetCoordsList.size()); // Dim: [numIterations * numQueries]
-	gpuErrchk(cudaMalloc(&d_L2distances, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(float) )); // Dim: [numIterations * numQueries]
-	gpuErrchk(cudaMalloc(&d_L2ParentIds, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(unsigned) )); // Dim: [numIterations * numQueries]
-	gpuErrchk(cudaMalloc(&d_L2distances_aux, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(float) )); // Dim: [numIterations * numQueries]
+	auto d_FPSetCoordsList = raft::make_device_vector<T>(handle, FPSetCoordsList.size()); // Dim: [numIterations * numQueries]
+	auto d_L2distances = raft::make_device_matrix<float>(uMAX_PARENTS_PERQUERY, numQueries); // Dim: [numIterations * numQueries]
+	auto d_L2ParentIds = raft::make_device_matrix<uint32_t>(handle, uMAX_PARENTS_PERQUERY, numQueries); // Dim: [numIterations * numQueries]
+	auto d_L2distances_aux = raft::make_device_matrix<float>(uMAX_PARENTS_PERQUERY, numQueries); // Dim: [numIterations * numQueries]
 	gpuErrchk(cudaMalloc(&d_L2ParentIds_aux, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(unsigned) )); // Dim: [numIterations * numQueries]
 
 	gpuErrchk(cudaMalloc(&d_mergedNodes, sizeof(unsigned) * (2*uWLLen)));
@@ -614,8 +612,8 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 
 //	gputimer.Start();
 	//Transfer neighbor IDs and count to GPU
-	gpuErrchk(cudaMemcpy(d_neighbors_temp, neighbors, sizeof(unsigned) * numQueries*(R+1), cudaMemcpyHostToDevice));
-	gpuErrchk(cudaMemcpy(d_numNeighbors_query_temp, numNeighbors_query, sizeof(unsigned) * (numQueries), cudaMemcpyHostToDevice));
+	raft::copy(d_neighbors_temp, neighbors, numQueries*(R+1), handle.get_stream());
+	raft::copy(d_numNeighbors_query_temp, numNeighbors_query, numQueries, handle.get_stream());
 //	gputimer.Stop();
 //	time_transfer += gputimer.Elapsed();
 
@@ -633,11 +631,10 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 		unsigned *d_neighbors_warmup = NULL;
 		unsigned uNeighbours_size = mapNodeIDToNode.size()/R;
 		unsigned *neighbors_warmup = (unsigned*)malloc(sizeof(unsigned) * uNeighbours_size);
-		gpuErrchk(cudaMalloc(&d_neighbors_warmup, sizeof(unsigned) * uNeighbours_size));
-		gpuErrchk(cudaMemcpy(d_neighbors_warmup, neighbors_warmup, sizeof(unsigned) * uNeighbours_size, cudaMemcpyHostToDevice));
+		auto d_neighbors_warmup = raft::make_device_vector<uint32_t>(uNeighbours_size);
+		raft::copy(d_neighbors_warmup,.data_handle() neighbors_warmup, uNeighbours_size, handle.get_stream());
 		compute_neighborDist_par_cachewarmup<<< uNeighbours_size, uNeighbours_size/R >>>(d_neighbors_warmup,
 		objIndexLoad.d_compressedVectors, objIndexLoad.uChunks,R);
-
 	}
 
 	// Cache Warm-up
@@ -647,7 +644,7 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 	auto milliStart = log_message("SEARCH STARTED");
 	auto start = std::chrono::high_resolution_clock::now();
 
-	gpuErrchk(cudaMemcpy(d_queriesFP, queriesFP, sizeof(T) * (D*numQueries), cudaMemcpyHostToDevice));
+	raft::copy(d_queriesFP.data_handle(), queriesFP, (D*numQueries), handle.get_stream());
 	auto stop = std::chrono::high_resolution_clock::now();
 	time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
 	gputimer.Start();
@@ -700,9 +697,9 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 
 	if (nQueryID == 0)
 	{
-		gpuErrchk(cudaMemcpy(&uTempNum, d_numNeighbors_query, sizeof(unsigned), cudaMemcpyDeviceToHost));
-		gpuErrchk(cudaMemcpy(uTempNeighbours, d_neighbors, uTempNum * sizeof(unsigned), cudaMemcpyDeviceToHost));
-
+		raft::copy(&uTempNum, d_numNeighbors_query, sizeof(unsigned), handle.get_stream());
+		raft::copy(uTempNeighbours, d_neighbors, uTempNum, handle.get_stream());
+		handle.sync_stream();
 		printf("Num Neighbours after filtering : %d \n", uTempNum);
 
 		for (int i = 0; i< uTempNum; i++)
@@ -755,15 +752,12 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 	do
 	{
 		// Let's wait for all kernels got a chance to execute before we initiate  transfer of the 'd_parents'
-		cudaStreamSynchronize(streamKernels);
+		stream_wait(streamKernels);
 
 		start = std::chrono::high_resolution_clock::now();
 
 		// Transfer parent IDs from GPU to CPU
-		gpuErrchk(cudaMemcpyAsync(parents, d_parents, sizeof(unsigned) * ((SIZEPARENTLIST)*numQueries),
-									cudaMemcpyDeviceToHost,
-									streamParent));
-
+		raft::copy(parents, d_parents, (SIZEPARENTLIST)*numQueries, streamParent);
 
 		stop = std::chrono::high_resolution_clock::now();
 		time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;;
@@ -873,13 +867,11 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 		start = std::chrono::high_resolution_clock::now();
 		// Transfer unfiltered neighbors from CPU to GPU
 
-		gpuErrchk(cudaMemcpyAsync(d_neighbors_temp, neighbors, sizeof(unsigned) * numQueries*(R+1),
-									cudaMemcpyHostToDevice,
-									streamChildren));
+		raft::copy(d_neighbors_temp, neighbors, numQueries*(R+1),
+									streamChildren);
 
-		gpuErrchk(cudaMemcpyAsync(d_numNeighbors_query_temp, numNeighbors_query, sizeof(unsigned) * (numQueries),
-									cudaMemcpyHostToDevice,
-									streamChildren));
+		raft::copy(d_numNeighbors_query_temp, numNeighbors_query, numQueries,
+									streamChildren);
 
 		// Transfer the FP vectors also from CPU to GPU in Async fashion
 		cudaMemcpyAsync(d_FPSetCoordsList + (iter * FPSetCoords_rowsize),
