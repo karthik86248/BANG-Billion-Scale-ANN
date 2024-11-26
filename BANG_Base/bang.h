@@ -60,7 +60,7 @@ extern "C"  void bang_set_searchparams_c(int recall, int worklist_length, DistFu
 */
 
 template<typename T>
-void bang_query(T* query_array, 
+void bang_query(raft::device_resources handle, T* query_array, 
                     int num_queries, 
                     result_ann_t* nearestNeighbours,
 					float* nearestNeighbours_dist );
