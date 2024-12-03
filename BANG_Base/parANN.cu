@@ -172,7 +172,7 @@ void bang_load(char* indexfile_path_prefix)
 
 	// Loading PQTable (binary)
 	float *pqTable = NULL;
-	pqTable = (float*) malloc(sizeof(float) * (256 * objIndexLoad.D)); // Contains pivot coordinates
+	pqTable = (float*) malloc(sizeof(float) * (CODEBOOK_SIZE * D)); // Contains pivot coordinates
 	if (NULL == pqTable)
 	{
 		printf("Error.. Malloc failed PQ Table\n");
@@ -367,7 +367,8 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 	unsigned *neighbors = NULL;
 	unsigned *numNeighbors_query = NULL;
 	unsigned *parents = NULL;
-	const unsigned long long FPSetCoords_size_bytes = D * sizeof(T);
+	const unsigned long long FPSetCoords_size_bytes = D;
+
 	const unsigned long long FPSetCoords_rowsize_bytes = FPSetCoords_size_bytes * numQueries;
 	const unsigned long long FPSetCoords_size = D ;
 	const unsigned long long FPSetCoords_rowsize = FPSetCoords_size * numQueries;
