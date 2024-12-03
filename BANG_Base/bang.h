@@ -65,10 +65,13 @@ void bang_query(raft::device_resources handle, T* query_array,
                     result_ann_t* nearestNeighbours,
 					float* nearestNeighbours_dist );
 
-extern "C" void bang_query_c(uint8_t* query_array, 
+extern "C" void bang_query_c(raft::device_resources handle, uint8_t* query_array, 
                     int num_queries, 
                     result_ann_t* nearestNeighbours,
 					float* nearestNeighbours_dist );
 
 
+void bang_unload();
+
+extern "C" void bang_unload_c( );
 #endif //BANG_H_

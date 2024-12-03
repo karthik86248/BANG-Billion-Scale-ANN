@@ -12,6 +12,7 @@ limitations under the License.
 // Authors: Karthik V., Saim Khan, Somesh Singh
 //
 #include <stdio.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <cstring>
 #include <omp.h>
@@ -311,7 +312,7 @@ int run_anns(char** argv)
 {
 
 	bang_load<T>(argv[1]);
-
+	sleep(10);
 	// load the queries
 	T* queriesFP = NULL;
 	int numQueries = atoi(argv[4]);
@@ -410,7 +411,7 @@ int run_anns(char** argv)
 		std::cout.setf(std::ios_base::fixed, std::ios_base::floatfield);
 		std::cout.precision(2);
 		std::string         recall_string = "Recall@" + std::to_string(recall_param);
-		cout << "Ls\t" << recall_string  << endl;
+		
 		std::vector<std::vector<result_ann_t> > query_result_ids(Lvec.size());
 
 		unsigned total_size=0;
@@ -428,6 +429,7 @@ int run_anns(char** argv)
 			float recall = 0;
 			if (calc_recall_flag)
 				recall = calculate_recall(numQueries, gt_ids, gt_dists, gt_dim, query_result_ids[test_id].data(), recall_param, recall_param);
+			cout << "Ls\t" << recall_string  << endl;
 			cout << L1 << "\t" << recall << endl;
 		}
 
@@ -442,6 +444,7 @@ int run_anns(char** argv)
 			break;
 	}while (1);
 
+	bang_unload();
 	free(queriesFP);
 	return 0;
 }
