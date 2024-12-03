@@ -14,6 +14,9 @@ limitations under the License.
 
 #ifndef BANG_H_
 #define BANG_H_
+
+#include <raft/core/device_resources.hpp>
+
 typedef unsigned long result_ann_t ; // big-ann-benchmarks requires the final ANNs to be returned as int64_t
 
 // Type of Similarity distnace measure
@@ -36,7 +39,7 @@ typedef enum _DistFunc
 
 */
 template<typename T>
-void bang_load( char* indexfile_path_prefix);
+void bang_load(raft::device_resources handle, char* indexfile_path_prefix);
 
 extern "C" void bang_load_c( char* indexfile_path_prefix);
 
