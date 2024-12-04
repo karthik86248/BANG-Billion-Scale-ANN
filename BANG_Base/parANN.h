@@ -92,7 +92,7 @@ __global__ void compute_L2Dist (T* d_FPSetCoordsList,
 								T* d_queriesFP,
 								unsigned* d_L2ParentIds,
 								float* d_L2distances,
-								unsigned* d_numQueries,
+								unsigned numQueries,
 								unsigned long long D,
 								unsigned n_DimAdjust=0);
 
@@ -112,7 +112,7 @@ __global__ void  compute_parent1(unsigned* d_neighbors, unsigned* d_numNeighbors
 							unsigned* d_iter,
  							unsigned* d_L2ParentIds,
  							unsigned* d_FPSetCoordsList_Counts,
- 							unsigned* d_numQueries,
+ 							unsigned numQueries,
 							unsigned long long MEDOID,
 							unsigned R);
 
@@ -123,7 +123,7 @@ __global__ void  compute_parent2(unsigned* d_neighbors, unsigned* d_numNeighbors
 							unsigned* d_iter,
  							unsigned* d_L2ParentIds,
  							unsigned* d_FPSetCoordsList_Counts,
- 							unsigned* d_numQueries,
+ 							unsigned numQueries,
 							unsigned uWLLen,
 							unsigned long long MEDOID,
 							unsigned R);
@@ -167,8 +167,8 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 						float* d_L2distances,
 						float* d_L2distances_aux,
 						result_ann_t* d_nearestNeighbours,
-						unsigned* d_numQueries,
-						unsigned* d_recall);
+						unsigned numQueries,
+						unsigned recall);
 
 __global__ void  compute_neighborDist_par_cachewarmup(unsigned* d_neighbors,
 											uint8_t* d_compressedVectors,

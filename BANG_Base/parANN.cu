@@ -38,6 +38,8 @@ limitations under the License.
 #include <raft/core/device_resources.hpp>
 #include <raft/core/host_mdarray.hpp>
 #include <raft/core/host_mdspan.hpp>
+#include <raft/core/pinned_mdarray.hpp>
+#include <raft/core/resource/cuda_stream_pool.hpp>
 
 #define MAX_R 64 // Max. node degree supported
 
@@ -69,46 +71,12 @@ const uint32_t BF_MEMORY = (BF_ENTRIES & 0xFFFFFFFC) + sizeof(uint32_t); // 4-by
 
 #define _DBG_BOUNDS 
 
+#define CODEBOOK_SIZE 256
+
 using namespace std;
 using Clock = std::chrono::high_resolution_clock;
 
 //texture<uint8_t, 1, cudaReadModeElementType> tex_compressedVectors; // for 1D texture memory
-
-
-off_t caclulate_filesize(const char* chFileName)
-{
-	int fd = -1;
-
-	if ((fd = open(chFileName, O_RDONLY , (mode_t)0 )) == -1)
-	{
-		perror("Error opening file for writing");
-		exit(EXIT_FAILURE);
-	}
-
-	long cur_pos = 0L;
-	off_t file_size = 0L;
-
-	// file would be opened with file offset set to the very beginning
-	cur_pos = lseek(fd, 0, SEEK_CUR);
-	file_size = lseek(fd, 0, SEEK_END);
-	lseek(fd, cur_pos, SEEK_CUR);
-	close(fd);
-	return file_size;
-}
-
-uint32_t long long log_message (const char* message)
-{
-	const std::chrono::time_point<std::chrono::system_clock> now = std::chrono::system_clock::now();
-	const std::time_t ctimenow_obj = std::chrono::system_clock::to_time_t(now );
-	auto duration = now.time_since_epoch();
-	auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
-	struct tm *local = localtime(&ctimenow_obj);
-	//printf("Today is %s %s\n", ctime(&ctimenow_obj),message);
-	cout <<  local->tm_hour <<":" << local->tm_min <<":"<< local->tm_sec << " [ " << millis << " ] : " << message << endl;
-	return millis;
-}
-
-
 
 static IndexLoad objIndexLoad;
 static SearchParams objSearchParams;
@@ -166,12 +134,11 @@ void bang_load(raft::device_resources handle, char* indexfile_path_prefix)
 	uint32_t R  = objGrapMetaData.uDegree;
 	uint32_t N  = objGrapMetaData.uDatasetSize;
 	
-	objIndexLoad.INDEX_ENTRY_LEN = INDEX_ENTRY_LEN;
-	objIndexLoad.MEDOID = MEDOID;
-	//objIndexLoad.uDataType = uDataType;
-	objIndexLoad.D = D;
-	objIndexLoad.R = R;
-	objIndexLoad.N = N;
+	objIndexLoad.MEDOID = objGrapMetaData.ullMedoid;
+	objIndexLoad.D = objGrapMetaData.uDim;;
+	objIndexLoad.R = objGrapMetaData.uDegree;
+	objIndexLoad.N = objGrapMetaData.uDatasetSize;
+	objIndexLoad.ullIndex_Entry_LEN = objGrapMetaData.ulluIndexEntryLen;
 
 
 	// Loading PQTable (binary)
@@ -270,7 +237,7 @@ void bang_load(raft::device_resources handle, char* indexfile_path_prefix)
 	
 	cout << "Graph Medoid is : " << objIndexLoad.MEDOID << "\t"  << endl;
 
-	auto d_pqTable = raft::make_device_matrix<float>(handle, CODEBOOK_SIZE, objIndexLoad.D);
+	auto d_pqTable = raft::make_device_matrix<float>(handle, (uint32_t)CODEBOOK_SIZE, objIndexLoad.D);
 	auto d_chunksOffset = raft::make_device_vector<uint32_t>(handle, n_chunks+1);
 	auto d_centroid = raft::make_device_vector<float>(handle, D);			//4*128 ~512B
 	raft::copy(d_centroid.data_handle(), centroid, D, handle.get_stream());
@@ -327,7 +294,7 @@ void bang_set_searchparams_c(int recall, int worklist_length, DistFunc nDistFunc
 }
 
 template<typename T>
-void bang_query(raft::resources handle, T* query_array, int num_queries, 
+void bang_query(raft::device_resources handle, T* query_array, int num_queries, 
 					result_ann_t* nearestNeighbours,
 					float* nearestNeighbours_dist )
 {
@@ -363,20 +330,19 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 	T* queriesFP = query_array;
 
 	// CPU Data Structs
-	unsigned *neighbors = NULL;
-	unsigned *numNeighbors_query = NULL;
-	unsigned *parents = NULL;
 	const unsigned long long FPSetCoords_size_bytes = D;
 
 	const unsigned long long FPSetCoords_rowsize_bytes = FPSetCoords_size_bytes * numQueries;
 	const unsigned long long FPSetCoords_size = D ;
 	const unsigned long long FPSetCoords_rowsize = FPSetCoords_size * numQueries;
-	T* FPSetCoordsList = NULL;
 
-	auto neighbors = raft::make_pinned_vector<uint32_t>(numQueries*(R+1));
+	auto neighbors_mdarray = raft::make_pinned_matrix<uint32_t>(handle, numQueries, (uint32_t)(R+1));
+	auto neighbors = neighbors_mdarray.data_handle();
 	// Note : R+1 is needed because MEDOID is added as additional neighbour in very first neighbour fetching
-	auto numNeighbors_query = raft::make_pinned_vector<uint32_t>(numQueries);
-	auto parents = raft::make_device_vector<uint32_t>(numQueries * SIZEPARENTLIST);
+	auto numNeighbors_query_mdarray = raft::make_pinned_vector<uint32_t>(handle, numQueries);
+	unsigned* numNeighbors_query = numNeighbors_query_mdarray.data_handle();
+	auto parents_mdarray = raft::make_pinned_matrix<uint32_t>(handle, numQueries, (uint32_t)SIZEPARENTLIST);
+	unsigned* parents = parents_mdarray.data_handle();
 
 
 	// Final set of K NNs for eacy query will be collected here (sent by GPU)
@@ -390,13 +356,12 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 	// GPU Data Structs
 	
 
-	auto pool = handle.get_stream_pool();
 	// A specific stream to to H2D of the FP vectors
- 	cudaStream_t streamFPTransfers = pool.get_stream(0);
- 	cudaStream_t streamKernels = pool.get_stream(1);
+ 	cudaStream_t streamFPTransfers = handle.get_stream_pool().get_stream(0);
+ 	cudaStream_t streamKernels = handle.get_stream_pool().get_stream(1);
 
- 	cudaStream_t streamParent = pool.get_stream(2);
- 	cudaStream_t streamChildren = pool.get_stream(3);
+ 	cudaStream_t streamParent = handle.get_stream_pool().get_stream(2);
+ 	cudaStream_t streamChildren = handle.get_stream_pool().get_stream(3);
 
 	// GPU execution times
 	double time_transfer = 0.0f;
@@ -421,8 +386,9 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 	//gpuErrchk(cudaMalloc(&d_compressedVectors, sizeof(uint8_t) * N * uChunks)); 	//100M*100 ~10GB
 	auto d_processed_bit_vec  = raft::make_device_matrix<bool>(handle, BF_MEMORY, numQueries);
 	auto d_nextIter = raft::make_device_scalar<bool>(handle, true);
+	auto d_iter = raft::make_device_scalar<uint32_t>(handle, 0);
 
-	auto d_pqDistTables = raft::make_device_matrix<float>(handle, 256, objIndexLoad.uChunks*numQueries);
+	auto d_pqDistTables = raft::make_device_matrix<float>(handle, (unsigned)CODEBOOK_SIZE, objIndexLoad.uChunks*numQueries);
 
 	auto d_queriesFP = raft::make_device_matrix<T>(handle, numQueries, D);
 	
@@ -430,20 +396,20 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 	auto d_numNeighbors_query = raft::make_device_vector<uint32_t>(handle, numQueries);
 
 	auto d_neighborsDist_query = raft::make_device_matrix<float>(handle, numQueries, (R+1));
-	auto d_neighborsDist_query_aux = raft::make_device_matrix<float>(numQueries, (R+1));
+	auto d_neighborsDist_query_aux = raft::make_device_matrix<float>(handle, numQueries, (R+1));
 
 	
-	auto d_parents = raft::make_device_matrix<uint32_t>(handle, numQueries, SIZEPARENTLIST);
+	auto d_parents = raft::make_device_matrix<uint32_t>(handle, numQueries, (uint32_t)SIZEPARENTLIST);
 	auto d_neighbors = raft::make_device_matrix<uint32_t>(handle, numQueries, (R+1));
 	auto d_neighbors_temp = raft::make_device_matrix<uint32_t>(handle, numQueries, (R+1));
 	auto d_numNeighbors_query_temp = raft::make_device_vector<uint32_t>(handle, numQueries);
 
 
-	auto d_BestLSets_count = raft::make_device_vector<uint32_t>(numQueries);
-	auto d_mark = raft::make_device_vector<uint32_t>(numQueries);			// ~40KB
+	auto d_BestLSets_count = raft::make_device_vector<uint32_t>(handle, numQueries);
+	auto d_mark = raft::make_device_vector<uint32_t>(handle, numQueries);			// ~40KB
 
 
-	gauto d_FPSetCoordsList_Counts = raft::make_device_vector<uint32_t>(numQueries);
+	auto d_FPSetCoordsList_Counts = raft::make_device_vector<uint32_t>(handle, numQueries);
 	auto d_nearestNeighbours = raft::make_device_matrix<result_ann_t>(handle, numQueries, recall_at);// Dim: [recall_at * numQueries]
 
 	GPUTimer gputimer (streamKernels,!bEnableGPUStats);	// Initiating the GPUTimer class object
@@ -462,7 +428,7 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 
 	unsigned uMAX_PARENTS_PERQUERY = (uWLLen + 50) ; //Needs to be set with expereince. set it to (2*L) if in doubt
 	assert ( uMAX_PARENTS_PERQUERY <= MAX_PARENTS_PERQUERY);
-	auto FPSetCoordsList = raft::make_pinned_vector<T>(uMAX_PARENTS_PERQUERY * numQueries * FPSetCoords_size_bytes);
+	auto FPSetCoordsList = raft::make_pinned_vector<T>(handle, uMAX_PARENTS_PERQUERY * numQueries * FPSetCoords_size_bytes);
 	auto d_FPSetCoordsList = raft::make_device_vector<T>(handle, FPSetCoordsList.size()); // Dim: [numIterations * numQueries]
 	auto d_L2distances = raft::make_device_matrix<float>(handle, uMAX_PARENTS_PERQUERY, numQueries); // Dim: [numIterations * numQueries]
 	auto d_L2ParentIds = raft::make_device_matrix<uint32_t>(handle, uMAX_PARENTS_PERQUERY, numQueries); // Dim: [numIterations * numQueries]
@@ -482,11 +448,11 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 		FPSetCoordsList_Counts[i] = 1;
 	}
 
-	raft::matrix::fill(handle, d_pqDistTables.view(), 0);
-	raft::matrix::fill(handle, d_processed_bit_vec.view(), 0);
-	raft::matrix::fill(handle, d_parents.view(), 0);
-	raft::matrix::fill(handle, d_BestLSets_count.view(), 0);
-	raft::matrix::fill(handle, d_mark.view(), 1);
+	gpuErrchk(cudaMemsetAsync(d_pqDistTables.data_handle(),0,sizeof(float) * (objIndexLoad.uChunks * 256 * numQueries), handle.get_stream()));
+	gpuErrchk(cudaMemsetAsync(d_processed_bit_vec.data_handle(), 0, sizeof(bool)*BF_MEMORY*numQueries, handle.get_stream()));
+	gpuErrchk(cudaMemsetAsync(d_parents.data_handle(), 0, sizeof(unsigned)*(numQueries*(SIZEPARENTLIST)), handle.get_stream()));
+	gpuErrchk(cudaMemsetAsync(d_BestLSets_count.data_handle(), 0, sizeof(unsigned)*(numQueries), handle.get_stream()));
+	gpuErrchk(cudaMemsetAsync(d_mark.data_handle(), 1, sizeof(unsigned)*(numQueries), handle.get_stream()));
 	// Note: parent for row 0, should be medoidID, but initializing entirely to medoidID just hurt
 	raft::copy(d_L2ParentIds.data_handle(), L2ParentIds, numQueries, handle.get_stream());
 	raft::copy(d_FPSetCoordsList_Counts.data_handle(), FPSetCoordsList_Counts, numQueries, handle.get_stream());
@@ -522,13 +488,13 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 
 		numNeighbors_query[ii] = numNeighbors;
 		// Copy the medoid's FP vectors Async (row 0) iter = 1 here.
-		memcpy(FPSetCoordsList + ((iter-1) * FPSetCoords_rowsize) + (ii*FPSetCoords_size),
+		memcpy(FPSetCoordsList.data_handle() + ((iter-1) * FPSetCoords_rowsize) + (ii*FPSetCoords_size),
 				objIndexLoad. pIndex + (objIndexLoad.ullIndex_Entry_LEN * objIndexLoad.MEDOID) ,
 				FPSetCoords_size_bytes);
 	}
 	// 0th row in FPSetCoordsListget copied to GPU in Async fashion
 	raft::copy(d_FPSetCoordsList.data_handle() + ((iter-1) * FPSetCoords_rowsize),
-					FPSetCoordsList + ((iter-1)* FPSetCoords_rowsize),
+					FPSetCoordsList.data_handle() + ((iter-1)* FPSetCoords_rowsize),
 					FPSetCoords_rowsize_bytes, streamFPTransfers);
 
 
@@ -566,11 +532,11 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 	time_K1 += gputimer.Elapsed();
 
 	gputimer.Start();
-	raft::matrix::fill(handle, d_numNeighbors_query.view(), 0);
+	gpuErrchk(cudaMemset(d_numNeighbors_query.data_handle(), 0, sizeof(unsigned)*numQueries));
 	/** [4] Launching the kernel with "numQueries" number of thread-blocks and block size of 256
 	 * One thread block is assigned to a query, i.e., 256 threads perform the computation for a query. The block size has been tuned for performance.
 	 */
-	neighbor_filtering_new<<<numQueries, numThreads_K5, 0, streamKernels >>> (d_neighbors, d_neighbors_temp, d_numNeighbors_query, d_numNeighbors_query_temp, d_processed_bit_vec,R);
+	neighbor_filtering_new<<<numQueries, numThreads_K5, 0, streamKernels >>> (d_neighbors.data_handle(), d_neighbors_temp.data_handle(), d_numNeighbors_query.data_handle(), d_numNeighbors_query_temp.data_handle(), d_processed_bit_vec.data_handle(),R);
 	gputimer.Stop();
 	time_neighbor_filtering += gputimer.Elapsed() ;
 
@@ -579,17 +545,18 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 	/** [5] Launching the kernel with "numQueries" number of thread-blocks and user specified "numThreads_K2" block size.
 	 * One thread block is assigned to a query, i.e., "numThreads_K2" threads perform the computation for a query.
 	 */
-	compute_neighborDist_par <<<numQueries, numThreads_K2,0, streamKernels >>> (d_neighbors.data_handle(), d_numNeighbors_query.data_handle() objIndexLoad.d_compressedVectors,
+	compute_neighborDist_par <<<numQueries, numThreads_K2,0, streamKernels >>> (d_neighbors.data_handle(), d_numNeighbors_query.data_handle(), objIndexLoad.d_compressedVectors,
 	d_pqDistTables.data_handle(), d_neighborsDist_query.data_handle(), objIndexLoad.uChunks, R);
+	gpuErrchk(cudaMemcpyAsync(d_iter.data_handle(), &iter, sizeof(unsigned), cudaMemcpyHostToDevice, handle.get_stream()));
 
 	/** [6] Launching the kernel with "X" number of thread-blocks and block size of one. X is calculated below
 	 * A single threads perform the computation for a query.
 	 * Note: The  additional arithmetic in the number of thread blocks it to arrive a ceil value. After assigning a required value
 	 * to numThreads_K4, the division could leat to a truncated quotient, resulting in lesser than expected thread blocks getting spawned.
 	 */
-	compute_parent1<<<(numQueries + numThreads_K4 -1 )/numThreads_K4,numThreads_K4,0, streamKernels >>>(d_neighbors, d_numNeighbors_query.data_handle(), d_neighborsDist_query.data_handle(),
-			d_BestLSets.data_handle(), d_BestLSetsDist.data_handle(), d_BestLSets_visited.data_handle(), d_parents.data_handle(), d_nextIter, d_BestLSets_count.data_handle(), d_mark.data_handle(),
-			d_iter,d_L2ParentIds,d_FPSetCoordsList_Counts, d_numQueries,MEDOID, R);
+	compute_parent1<<<(numQueries + numThreads_K4 -1 )/numThreads_K4,numThreads_K4,0, streamKernels >>>(d_neighbors.data_handle(), d_numNeighbors_query.data_handle(), d_neighborsDist_query.data_handle(),
+			d_BestLSets.data_handle(), d_BestLSetsDist.data_handle(), d_BestLSets_visited.data_handle(), d_parents.data_handle(), d_nextIter.data_handle(), d_BestLSets_count.data_handle(), d_mark.data_handle(),
+			d_iter.data_handle(),d_L2ParentIds.data_handle(),d_FPSetCoordsList_Counts.data_handle(), numQueries,MEDOID, R);
 		
 	gputimer.Stop();
 	time_B1_vec.push_back(gputimer.Elapsed());
@@ -598,7 +565,7 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 	do
 	{
 		// Let's wait for all kernels got a chance to execute before we initiate  transfer of the 'd_parents'
-		stream_wait(streamKernels);
+		raft::resource::wait_stream_pool_on_stream(handle);
 
 		start = std::chrono::high_resolution_clock::now();
 
@@ -614,7 +581,7 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 		 */
 		compute_BestLSets_par_sort_msort<<<numQueries, numThreads_K3,0, streamKernels >>>(d_neighbors.data_handle(),
 															d_neighbors_aux.data_handle(),
-															d_numNeighbors_query.data_handle()
+															d_numNeighbors_query.data_handle(),
 															d_neighborsDist_query.data_handle(),
 															d_neighborsDist_query_aux.data_handle(),
 															d_nextIter.data_handle(), R);
@@ -625,7 +592,7 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 		 * so we require 2*L threads per query.
 		 */
 		compute_BestLSets_par_merge<<<numQueries, numThreads_K3_merge, R*sizeof(float), streamKernels >>>(d_neighbors.data_handle(),
-										d_numNeighbors_query.data_handle()
+										d_numNeighbors_query.data_handle(),
 										d_neighborsDist_query.data_handle(),
 										d_BestLSets.data_handle(),
 										d_BestLSetsDist.data_handle(),
@@ -679,7 +646,7 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 					unsigned offset_neighbors = ii * offset;
 
 					// Copy the Parent's'FP vectors of current query
-					memcpy(FPSetCoordsList + (iter * FPSetCoords_rowsize) + (ii*FPSetCoords_size),
+					memcpy(FPSetCoordsList.data_handle() + (iter * FPSetCoords_rowsize) + (ii*FPSetCoords_size),
 							objIndexLoad.pIndex + (objIndexLoad.ullIndex_Entry_LEN * curreParent),
 							FPSetCoords_size_bytes);
 
@@ -718,7 +685,7 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 
 		// Transfer the FP vectors also from CPU to GPU in Async fashion
 		cudaMemcpyAsync(d_FPSetCoordsList.data_handle() + (iter * FPSetCoords_rowsize),
-					FPSetCoordsList + (iter * FPSetCoords_rowsize),
+					FPSetCoordsList.data_handle() + (iter * FPSetCoords_rowsize),
 					FPSetCoords_rowsize_bytes, cudaMemcpyHostToDevice, streamFPTransfers);
 
 		cudaMemsetAsync(d_numNeighbors_query.data_handle(), 0, sizeof(uint32_t)*numQueries, streamChildren);
@@ -733,7 +700,7 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 		 */
 		neighbor_filtering_new<<<numQueries, numThreads_K5,0, streamKernels >>> (d_neighbors.data_handle(),
 																		d_neighbors_temp.data_handle(),
-																		d_numNeighbors_query.data_handle()
+																		d_numNeighbors_query.data_handle(),
 																		d_numNeighbors_query_temp.data_handle(),
 																		d_processed_bit_vec.data_handle(), R);
 		gputimer.Stop();
@@ -750,14 +717,14 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 
 		++iter;
 
-		gpuErrchk(cudaMemcpy(d_iter, &iter, sizeof(unsigned), cudaMemcpyHostToDevice));
+		gpuErrchk(cudaMemcpyAsync(d_iter.data_handle(), &iter, sizeof(unsigned), cudaMemcpyHostToDevice, handle.get_stream()));
 
 		/** [13] Launching the kernel with "X" number of thread-blocks and block size of one.
 	 	* A songle threads perform the computation for a query.
 		 */
-		compute_parent2<<<(numQueries + numThreads_K4 -1 )/numThreads_K4,numThreads_K4,0, streamKernels >>>(d_neighbors.data_handle(), d_numNeighbors_query.data_handle() d_neighborsDist_query.data_handle(),  d_BestLSets.data_handle(),
-				d_BestLSetsDist.data_handle(), d_BestLSets_visited.data_handle(), d_parents.data_handle(), d_nextIter.data_handle(), d_BestLSets_count.data_handle(), d_mark,
-				iter, d_L2ParentIds.data_handle(), d_FPSetCoordsList_Counts.data_handle(), numQueries,uWLLen, MEDOID,R);
+		compute_parent2<<<(numQueries + numThreads_K4 -1 )/numThreads_K4,numThreads_K4,0, streamKernels >>>(d_neighbors.data_handle(), d_numNeighbors_query.data_handle(), d_neighborsDist_query.data_handle(),  d_BestLSets.data_handle(),
+				d_BestLSetsDist.data_handle(), d_BestLSets_visited.data_handle(), d_parents.data_handle(), d_nextIter.data_handle(), d_BestLSets_count.data_handle(), d_mark.data_handle(),
+				d_iter.data_handle(), d_L2ParentIds.data_handle(), d_FPSetCoordsList_Counts.data_handle(), numQueries,uWLLen, MEDOID,R);
 
 		gputimer.Stop();
 		time_B1_vec.push_back(gputimer.Elapsed());
@@ -801,28 +768,6 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 												d_nearestNeighbours.data_handle(),
 												numQueries,
 												recall_at);
-
-
-
-	for (int i=0; i< pTempNumParents[nQueryID]; i++ )
-	{
-		printf("Parent = %d \t distance = %f\n", pTempParents[(numQueries*i) + nQueryID ], pTempDists[(numQueries*i) + nQueryID ] );
-	}
-	free(pTempDists);
-	free(pTempParents);
-	free(pTempNumParents);
-}
-#endif
-	compute_NearestNeighbours<<<numQueries, MAX_PARENTS_PERQUERY >>> (d_L2ParentIds,
-												d_L2ParentIds_aux,
-												d_FPSetCoordsList_Counts,
-												d_L2distances,
-												d_L2distances_aux,
-												d_nearestNeighbours,
-												d_numQueries,
-												d_recall);
-
-
 
 	gputimer.Stop();
 
@@ -889,7 +834,7 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 #ifdef _DBG_BOUNDS
 	uint32_t* FPSetCoordsList_Counts_temp = (uint32_t*)malloc(sizeof(uint32_t) * numQueries);
 
-	gpuErrchk(cudaMemcpy(FPSetCoordsList_Counts_temp, d_FPSetCoordsList_Counts.data_handle(), sizeof(uint32_t) * numQueries, cudaMemcpyDeviceToHost ));
+	gpuErrchk(cudaMemcpyAsync(FPSetCoordsList_Counts_temp, d_FPSetCoordsList_Counts.data_handle(), sizeof(uint32_t) * numQueries, cudaMemcpyDeviceToHost ));
 	for (int i=0; i< numQueries; i++)
 	{
 		total_size += FPSetCoordsList_Counts_temp[i];
@@ -911,9 +856,6 @@ void bang_query(raft::resources handle, T* query_array, int num_queries,
 	seek_neighbours_time = 0;
 	fp_set_time_gpu = 0;
 	iter = 1;
-
-	// Free all allocated memory on CPU and GPU
-	gpuErrchk(cudaFreeHost(FPSetCoordsList));
 
 }
 
@@ -1121,11 +1063,11 @@ __global__ void  compute_neighborDist_par(unsigned* d_neighbors,
  * @param n_DimAdjust Number of dummy dimensions i.e. Zero-value dimensions appended for MIPS to L2 conversion.
  */
 template<typename T>
-__global__ void compute_L2Dist (T* d_FPSetCoordsList.data_handle(),
-								uint32_t* d_FPSetCoordsList_Counts.data_handle(),
+__global__ void compute_L2Dist (T* d_FPSetCoordsList,
+								uint32_t* d_FPSetCoordsList_Counts,
 								T* d_queriesFP,
-								uint32_t* d_L2ParentIds.data_handle(),
-								float* d_L2distances.data_handle(),
+								uint32_t* d_L2ParentIds,
+								float* d_L2distances,
 								uint32_t numQueries,
 								uint32_t long long D,
 								uint32_t n_DimAdjust)
@@ -1137,7 +1079,6 @@ __global__ void compute_L2Dist (T* d_FPSetCoordsList.data_handle(),
 	unsigned numNodes = d_FPSetCoordsList_Counts[queryID];
 	unsigned tid = threadIdx.x;
 	unsigned gid =  queryID * (D - n_DimAdjust);
-	unsigned numQueries = *d_numQueries;
 	// ToDo : see if this can be re-used from global, instead of re-defining here
 	const unsigned long long FPSetCoords_size = D;
 	const unsigned long long FPSetCoords_rowsize = FPSetCoords_size * numQueries;
@@ -1184,8 +1125,8 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 						float* d_L2distances,
 						float* d_L2distances_aux,
 						result_ann_t* d_nearestNeighbours,
-						uint32_t* d_numQueries,
-						uint32_t* recall_at)
+						uint32_t numQueries,
+						uint32_t recall_at)
 {
     uint32_t tid = threadIdx.x;
     uint32_t queryID = blockIdx.x;
@@ -1203,14 +1144,14 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 		uint32_t end = min(start + subArraySize, numNeighbors);
 
 		if(tid >= start && tid < mid){
-			uint32_t lowerBound = lower_bound_d_ex(&d_L2distances[mid * (*d_numQueries)], 0, end-mid, d_L2distances[(tid * (*d_numQueries)) + queryID],
-								*d_numQueries, queryID);
+			uint32_t lowerBound = lower_bound_d_ex(&d_L2distances[mid * (numQueries)], 0, end-mid, d_L2distances[(tid * (numQueries)) + queryID],
+								numQueries, queryID);
 			shm_pos[tid] = lowerBound + tid;	// Position for this element
 		}
 
 		if(tid >= mid && tid < end)  {
-			uint32_t upperBound = upper_bound_d_ex(&d_L2distances[start * (*d_numQueries)], 0, mid-start, d_L2distances[(tid * (*d_numQueries)) + queryID],
-								*d_numQueries, queryID);
+			uint32_t upperBound = upper_bound_d_ex(&d_L2distances[start * (numQueries)], 0, mid-start, d_L2distances[(tid * (numQueries)) + queryID],
+								 numQueries, queryID);
 			shm_pos[tid] = start + (upperBound + tid-mid);	// Position for this element
 
 		}
@@ -1219,20 +1160,20 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 
 		// Copy the neighbors to auxiliary array at their correct position
 		for(int i=tid; i < numNeighbors; i += blockDim.x) {
-			d_L2distances_aux[(shm_pos[i]* (*d_numQueries)) + queryID] = d_L2distances[(i * (*d_numQueries)) + queryID];
-			d_L2ParentIds_aux[(shm_pos[i]* (*d_numQueries)) + queryID] = d_L2ParentIds[(i * (*d_numQueries)) + queryID];
+			d_L2distances_aux[(shm_pos[i]* (numQueries)) + queryID] = d_L2distances[(i * (numQueries)) + queryID];
+			d_L2ParentIds_aux[(shm_pos[i]* (numQueries)) + queryID] = d_L2ParentIds[(i * (numQueries)) + queryID];
 		}
 		__syncthreads();
 		// Copy the auxiliary array to original array
 		for(int i=tid; i < numNeighbors; i += blockDim.x) {
-			d_L2distances[(i * (*d_numQueries)) + queryID] = d_L2distances_aux[(i * (*d_numQueries)) + queryID];
-			d_L2ParentIds[(i * (*d_numQueries)) + queryID] = d_L2ParentIds_aux[(i * (*d_numQueries)) + queryID];
+			d_L2distances[(i * (numQueries)) + queryID] = d_L2distances_aux[(i * (numQueries)) + queryID];
+			d_L2ParentIds[(i * (numQueries)) + queryID] = d_L2ParentIds_aux[(i * (numQueries)) + queryID];
 		}
 		__syncthreads();
 	}
 	for(uint32_t ii = tid; ii < recall_at; ii += blockDim.x)
 	{
-		d_nearestNeighbours[( (*d_recall * queryID) ) + ii ] = d_L2ParentIds[( (*d_numQueries) * ii) + queryID ];
+		d_nearestNeighbours[( (recall_at * queryID) ) + ii ] = d_L2ParentIds[( (numQueries) * ii) + queryID ];
 	}
 }
 
@@ -1257,14 +1198,14 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
  								unsigned* d_iter,
  								unsigned* d_L2ParentIds,
  								unsigned* d_FPSetCoordsList_Counts,
- 								unsigned* d_numQueries,
+ 								unsigned numQueries,
 								unsigned uWLLen,
 								unsigned long long MEDOID,
 								unsigned R)
  {
 	uint32_t tid = threadIdx.x;
   	uint32_t queryID = (blockIdx.x*blockDim.x) + tid;
-	if (queryID >= (*d_numQueries) )
+	if (queryID >= (numQueries) )
 		return;
 
   	// Single thread is enough to compute the parent (pre-fetched) for a query. So, One ThreadBlock can work
@@ -1274,7 +1215,6 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 
 	float dist=3.402823E+38;	//assigning max float value
 	uint32_t index = 0;
-	uint32_t numQueries = *d_numQueries;
 	uint32_t offset = queryID*(R+1);
 
 	/*Locate closest neighbor in neighbor list*/
@@ -1325,7 +1265,7 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 		// Note: One thread assigned to one Query, so ok to increment (no contention)
 		d_FPSetCoordsList_Counts[queryID]++;
 		// At this point the count of parent is one ahead of the iteration number
-		d_L2ParentIds[(iter * numQueries) + queryID] = d_parents[parentOffset + parentIndex];
+		d_L2ParentIds[( (*d_iter) * numQueries) + queryID] = d_parents[parentOffset + parentIndex];
 	}
  }
 
@@ -1339,13 +1279,13 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
  								unsigned* d_iter,
  								unsigned* d_L2ParentIds,
  								unsigned* d_FPSetCoordsList_Counts,
- 								unsigned* d_numQueries,
+ 								unsigned numQueries,
 								unsigned long long MEDOID,
 								unsigned R)
  {
 	unsigned tid = threadIdx.x;
   	unsigned queryID = (blockIdx.x*blockDim.x) + tid;
-	if (queryID >= (*d_numQueries) )
+	if (queryID >= (numQueries) )
 		return;
 
   	// Single thread is enough to compute the parent (pre-fetched) for a query. So, One ThreadBlock can work
@@ -1354,7 +1294,6 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 	
 	float dist=3.402823E+38;	//assigning max float value
 	unsigned index = 0;
-	unsigned numQueries = *d_numQueries;
 
 	unsigned offset = queryID *(R+1);
 
@@ -1402,9 +1341,9 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
  * @param d_nextIter This maintains boolean flags for all queries, to decide if a query is to processed in the next iteration.
  * @param R Graph degree.
  */
-__global__ void  compute_BestLSets_par_sort_msort(uint32_t* d_neighbors.data_handle(),
+__global__ void  compute_BestLSets_par_sort_msort(uint32_t* d_neighbors,
 													uint32_t* d_neighbors_aux,
-													uint32_t* d_numNeighbors_query.data_handle()
+													uint32_t* d_numNeighbors_query,
 													float* d_neighborsDist_query,
 													float* d_neighborsDist_query_aux,
 													bool* d_nextIter,
