@@ -489,8 +489,8 @@ void bang_query(raft::device_resources handle, T* query_array, int num_queries,
 		numNeighbors_query[ii] = numNeighbors;
 		// Copy the medoid's FP vectors Async (row 0) iter = 1 here.
 		memcpy(FPSetCoordsList.data_handle() + ((iter-1) * FPSetCoords_rowsize) + (ii*FPSetCoords_size),
-				objIndexLoad. pIndex + (objIndexLoad.ullIndex_Entry_LEN * objIndexLoad.MEDOID) ,
-				FPSetCoords_size_bytes);
+				objIndexLoad.pIndex + (objIndexLoad.ullIndex_Entry_LEN * objIndexLoad.MEDOID) ,
+				FPSetCoords_size_bytes * sizeof(float));
 	}
 	// 0th row in FPSetCoordsListget copied to GPU in Async fashion
 	raft::copy(d_FPSetCoordsList.data_handle() + ((iter-1) * FPSetCoords_rowsize),
@@ -648,7 +648,7 @@ void bang_query(raft::device_resources handle, T* query_array, int num_queries,
 					// Copy the Parent's'FP vectors of current query
 					memcpy(FPSetCoordsList.data_handle() + (iter * FPSetCoords_rowsize) + (ii*FPSetCoords_size),
 							objIndexLoad.pIndex + (objIndexLoad.ullIndex_Entry_LEN * curreParent),
-							FPSetCoords_size_bytes);
+							FPSetCoords_size_bytes * sizeof(float));
 
 					// Extract Neighbour
 					uint32_t *puNumNeighbours = (uint32_t*)(objIndexLoad.pIndex + ((objIndexLoad.ullIndex_Entry_LEN*curreParent)+(sizeof(T)*D)) );;
@@ -686,7 +686,7 @@ void bang_query(raft::device_resources handle, T* query_array, int num_queries,
 		// Transfer the FP vectors also from CPU to GPU in Async fashion
 		cudaMemcpyAsync(d_FPSetCoordsList.data_handle() + (iter * FPSetCoords_rowsize),
 					FPSetCoordsList.data_handle() + (iter * FPSetCoords_rowsize),
-					FPSetCoords_rowsize_bytes, cudaMemcpyHostToDevice, streamFPTransfers);
+					FPSetCoords_rowsize_bytes * sizeof(float), cudaMemcpyHostToDevice, streamFPTransfers);
 
 		cudaMemsetAsync(d_numNeighbors_query.data_handle(), 0, sizeof(uint32_t)*numQueries, streamChildren);
 		cudaStreamSynchronize(streamChildren);
