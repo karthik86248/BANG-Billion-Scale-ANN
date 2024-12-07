@@ -14,6 +14,9 @@ limitations under the License.
 
 #ifndef BANG_H_
 #define BANG_H_
+
+#include <cstdint>
+
 typedef unsigned long result_ann_t ; // big-ann-benchmarks requires the final ANNs to be returned as int64_t
 
 // Type of Similarity distnace measure
@@ -38,6 +41,7 @@ typedef enum _DistFunc
 template<typename T>
 void bang_load( char* indexfile_path_prefix);
 
+// Note:  Equivalent "C" APIs have also been provided. For invocation from Python scripts (using CDLL package)
 extern "C" void bang_load_c( char* indexfile_path_prefix);
 
 

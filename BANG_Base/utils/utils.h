@@ -14,10 +14,14 @@ limitations under the License.
 #ifndef UTILS_H_
 #define UTILS_H_
 
-#include <cuda_runtime.h>
-#include <stdio.h>
-#include <fcntl.h>
+
 #include <unistd.h>
+#include <stdio.h>
+#include <chrono>
+#include <fcntl.h>
+
+
+#include <cuda_runtime.h>
 
 #include <iostream>
 
