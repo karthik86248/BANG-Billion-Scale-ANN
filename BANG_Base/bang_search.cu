@@ -25,7 +25,7 @@ limitations under the License.
 // CUDA
 #include <cub/cub.cuh>
 
-// STL 
+// STL
 #include <iostream>
 #include <cstdio>
 #include <fstream>
@@ -49,26 +49,25 @@ limitations under the License.
 const unsigned BF_MEMORY = (BF_ENTRIES & 0xFFFFFFFC) + sizeof(unsigned); // 4-byte mem aligned size for actual allocation
 
 // Indicates static upper bound on search iterations performed
-// uMAX_PARENTS_PERQUERY is the limit determined dynamically based on worklist length
-// a #define is needed for shared memory allocation and the dynamic limit cannot be used directly
-#define MAX_PARENTS_PERQUERY  (L+50) 
-									
+#define NAX_EXTRA_ITERATION		(50)
+#define MAX_PARENTS_PERQUERY  (MAX_L+NAX_EXTRA_ITERATION) //Needs to be set with expereince. set it to (2*MAX_L), if in doubt
+
 // Per query, nly one Candidate (Parent) is send from GPU to CPU  to fetch its neighbours from the Graph Index.
 // In future, we could use multiple Parents.
 #define SIZEPARENTLIST  (1+1) // one to indicate present/absent and other the actual parent ID
 
-// Capabilities
-#define ENABLE_GPU_STATS 		0x00000001
+//#define _DBG_CAND
 
-#define _DBG_BOUNDS 
+//#define _DBG_BOUNDS
 
 using namespace std;
 using Clock = std::chrono::high_resolution_clock;
 
 // Utility Objects to access relevant params across load/query phases
-static IndexLoad objIndexLoad;
-static SearchParams objSearchParams;
-
+static IndexLoad oInputData;
+static SearchParams oSearchParams;
+static GPUInstance oGPUInst;
+static HostInstance oHostInst;
 
 template<typename T>
 void bang_load(char* indexfile_path_prefix)
@@ -87,21 +86,20 @@ void bang_load(char* indexfile_path_prefix)
 		printf("Error.. Could not open the PQ Pivots File: %s", pqTable_file.c_str() );
 		return;
 	}
-	cout << pqTable_file << endl;
+	
 	ifstream in2(compressedVector_file, std::ios::binary);
 	if(!in2.is_open()){
 		printf("Error.. Could not open the PQ Compressed Vectors File: %s", compressedVector_file.c_str() );
 		return;
 	}
-	cout << compressedVector_file<< endl;
+	
 
 	ifstream in3(graphAdjListAndFP_file, std::ios::binary);
 	if(!in3.is_open()){
 		printf("Error.. Could not open the Graph Index File: %s", graphAdjListAndFP_file.c_str());
 		return;
 	}
-	cout << graphAdjListAndFP_file<< endl;
-
+	
 	// Reading the Graph Metadata File
 	GraphMedataData objGrapMetaData;
 	ifstream in5(graphMetadata_file, std::ios::binary);
@@ -115,34 +113,23 @@ void bang_load(char* indexfile_path_prefix)
 	cout << "Metadata : " << objGrapMetaData.ullMedoid << ", " << objGrapMetaData.ulluIndexEntryLen  << ", " << objGrapMetaData.uDatatype  <<
 	", " << objGrapMetaData.uDim << ", " << objGrapMetaData.uDegree << ", " << objGrapMetaData.uDatasetSize << endl;
 
-	objIndexLoad.MEDOID = objGrapMetaData.ullMedoid;
-	objIndexLoad.D = objGrapMetaData.uDim;;
-	objIndexLoad.R = objGrapMetaData.uDegree;
-	objIndexLoad.N = objGrapMetaData.uDatasetSize;
-	objIndexLoad.ullIndex_Entry_LEN = objGrapMetaData.ulluIndexEntryLen;
+	oInputData.MEDOID = objGrapMetaData.ullMedoid;
+	oInputData.D = objGrapMetaData.uDim;;
+	oInputData.R = objGrapMetaData.uDegree;
+	oInputData.N = objGrapMetaData.uDatasetSize;
+	oInputData.ullIndex_Entry_LEN = objGrapMetaData.ulluIndexEntryLen;
 
-	// Loading PQTable (binary)
-	float *pqTable = NULL;
-	pqTable = (float*) malloc(sizeof(float) * (256 * objIndexLoad.D)); // Contains pivot coordinates
-	if (NULL == pqTable)
-	{
-		printf("Error.. Malloc failed PQ Table\n");
-		return;
-	}
-
-	in1.seekg(8);
-	in1.read((char*)pqTable,sizeof(float)*256*objIndexLoad.D);
-	in1.close();
 
 	// Loading PQ Compressed Vector (binary)
 	unsigned int N = 0;
 	in2.read((char*)&N, sizeof(int));
+	cout << "Loaded:" <<  compressedVector_file<< endl;
 	cout << "No of points in Dataset = " << N	 << endl;
 
 	unsigned int uChunks = 0;
 	in2.read((char*)&uChunks, sizeof(int));
 	cout << "# PQ Chunks = " << uChunks << endl;
-	objIndexLoad.uChunks = uChunks;
+	oInputData.uChunks = uChunks;
 
 	uint8_t* compressedVectors = NULL;
 	compressedVectors = (uint8_t*) malloc(sizeof(uint8_t) * uChunks * N);
@@ -157,49 +144,28 @@ void bang_load(char* indexfile_path_prefix)
 	in2.close();
 
 	// To reduce Peak Host memory usage, loading compressed vectors to CPU and transferring to GPU and releasing host memory
-	uint8_t* d_compressedVectors = NULL;
-	gpuErrchk(cudaMalloc(&d_compressedVectors, sizeof(uint8_t) * N * uChunks)); 	//100M*100 ~10GB
-	gpuErrchk(cudaMemcpy(d_compressedVectors, compressedVectors, (unsigned long long)(sizeof(uint8_t) * (unsigned long long)(uChunks)*N),
+	printf("Transferring Compressed Vectors to GPU ...\n");
+	gpuErrchk(cudaMalloc(&oInputData.d_compressedVectors, sizeof(uint8_t) * N * uChunks)); 	//100M*100 ~10GB
+	gpuErrchk(cudaMemcpy(oInputData.d_compressedVectors, compressedVectors, (unsigned long long)(sizeof(uint8_t) * (unsigned long long)(uChunks)*N),
 	cudaMemcpyHostToDevice));
-	objIndexLoad.d_compressedVectors = d_compressedVectors;
+
 	free(compressedVectors);
 	compressedVectors = NULL;
-	printf("Transferring Compressed Vectors done\n");
+
 
 	// Load the Vamana(DiskANN) Graph Index
-	uint8_t* pIndex = NULL;
-	off_t size_indexfile = caclulate_filesize(graphAdjListAndFP_file.c_str());
-
-	pIndex = (uint8_t*)malloc(size_indexfile);
-	if (NULL == pIndex)
+	oInputData.size_indexfile  = caclulate_filesize(graphAdjListAndFP_file.c_str());
+	oInputData.pIndex = (uint8_t*)malloc(oInputData.size_indexfile);
+	if (NULL == oInputData.pIndex)
 	{
-		printf("Error.. Malloc failed for Graph\n");
+		printf("Error.. Malloc failed for Graph Index.\n");
 		return;
 	}
-	objIndexLoad.pIndex = pIndex;
-	objIndexLoad.size_indexfile = size_indexfile;
-	int nRetIndex = mlock(pIndex, sizeof(size_indexfile));
-	
-	if (nRetIndex)
-		perror("Index File");
+
 	log_message("Index Load Started");
-	in3.read((char*)pIndex, size_indexfile);
+	in3.read((char*)oInputData.pIndex, oInputData.size_indexfile);
 	log_message("Index Load Done");
 	in3.close();
-
-	// Loading chunk offsets
-	unsigned n_chunks = uChunks;
-	unsigned *chunksOffset = (unsigned*) malloc(sizeof(unsigned) * (n_chunks+1));
-	uint64_t numr = n_chunks + 1;
-	uint64_t numc = 1;
-
-	load_bin<uint32_t>(chunkOffsets_file, chunksOffset, numr, numc);	//Import the chunkoffset file
-
-	// Loading centroid coordinates
-	float* centroid = nullptr;
-	load_bin<float>(centroid_file, centroid, numr, numc);				//Import centroid from centroid file
-
-	// GroundTruth loading done later
 
 	// Sanity test start
 	// to see if the Index file was loaded properly
@@ -210,48 +176,65 @@ void bang_load(char* indexfile_path_prefix)
 	unsigned *puNumNeighbours1 = NULL;
 
 	// First neighbour calculation
-	puNumNeighbours = (unsigned*)(pIndex+((objIndexLoad.ullIndex_Entry_LEN*0)+ (sizeof(T)*objIndexLoad.D) ));
+	puNumNeighbours = (unsigned*)(oInputData.pIndex+((oInputData.ullIndex_Entry_LEN*0)+ (sizeof(T)*oInputData.D) ));
 	puNeighbour = puNumNeighbours + 1;
 
 	// Last neighbour calculation
-	puNumNeighbours1 = (unsigned*)(pIndex + ( (objIndexLoad.ullIndex_Entry_LEN * (objIndexLoad.N-1)) + (sizeof(T)*objIndexLoad.D) )) ;
+	puNumNeighbours1 = (unsigned*)(oInputData.pIndex + ( (oInputData.ullIndex_Entry_LEN * (oInputData.N-1)) + (sizeof(T)*oInputData.D) )) ;
 	puNeighbour1 = puNumNeighbours1 + (*puNumNeighbours1) ;
 	// Print the first and last neighbour in AdjList
-	printf("%u \t %u\n", *puNeighbour, *puNeighbour1);
+	printf("First Neighbour : %u \t Last Neighbour: %u\n", *puNeighbour, *puNeighbour1);
 
-	assert (*puNeighbour <= objIndexLoad.N);
-	assert (*puNeighbour1 <= objIndexLoad.N);
+	assert (*puNeighbour <= oInputData.N);
+	assert (*puNeighbour1 <= oInputData.N);
 	// Sanity test end
-	
-	cout << "Graph Medoid is : " << objIndexLoad.MEDOID << "\t"  << endl;
 
-	float *d_pqTable = NULL;
-	unsigned  *d_chunksOffset = NULL;
-	float *d_centroid = NULL;
+	cout << "Graph Medoid is : " << oInputData.MEDOID << "\t"  << endl;
+	cout << "BF Size : " << BF_ENTRIES << "\t"  << endl;
 
-	gpuErrchk(cudaMalloc(&d_pqTable, sizeof(float) * (256*objIndexLoad.D)));
-	gpuErrchk(cudaMalloc(&d_chunksOffset, sizeof(unsigned) * (n_chunks+1)));
-	gpuErrchk(cudaMalloc(&d_centroid, sizeof(float) * (objIndexLoad.D)));			
-	gpuErrchk(cudaMemcpy(d_centroid, centroid, sizeof(float) * (objIndexLoad.D), cudaMemcpyHostToDevice));
+	// Loading PQTable (binary)
+	float *pqTable = (float*) malloc(sizeof(float) * (256 * oInputData.D)); // Contains pivot coordinates
+	if (NULL == pqTable)
+	{
+		printf("Error.. Malloc failed PQ Table\n");
+		return;
+	}
 
-	objIndexLoad.d_pqTable = d_pqTable;
-	objIndexLoad.d_chunksOffset = d_chunksOffset;
-	objIndexLoad.d_centroid = d_centroid;
-
+	in1.seekg(8);
+	in1.read((char*)pqTable,sizeof(float)*256*oInputData.D);
+	in1.close();
+	cout << "Loaded:" << pqTable_file << endl;
 	// transpose pqTable
-	float *pqTable_T = NULL; // always float irrespective of T
-	pqTable_T = (float*) malloc(sizeof(float) * (256 * objIndexLoad.D));
+	float *pqTable_T = (float*) malloc(sizeof(float) * (256 * oInputData.D));
 	for(unsigned row = 0; row < 256; ++row) {
-		for(unsigned col = 0; col < objIndexLoad.D; ++col) {
-			pqTable_T[col* 256 + row] = pqTable[row*objIndexLoad.D+col];
+		for(unsigned col = 0; col < oInputData.D; ++col) {
+			pqTable_T[col* 256 + row] = pqTable[row*oInputData.D+col];
 		}
 	}
 
-	// host to device transfer
-	gpuErrchk(cudaMemcpy(d_pqTable, pqTable_T, sizeof(float) * (256*objIndexLoad.D), cudaMemcpyHostToDevice));
-	gpuErrchk(cudaMemcpy(d_chunksOffset, chunksOffset, sizeof(unsigned) * (n_chunks+1), cudaMemcpyHostToDevice));
-	
+	// Loading chunk offsets
+	unsigned *chunksOffset = NULL; //(unsigned*) malloc(sizeof(unsigned) * (oInputData.n_chunks+1));
+	uint64_t numr = oInputData.uChunks + 1;
+	uint64_t numc = 1;
+	load_bin<uint32_t>(chunkOffsets_file, chunksOffset, numr, numc);	//Import the chunkoffset file
+	cout << "Loaded:" <<  chunkOffsets_file << endl;
+	// Loading centroid coordinates
+	numr = oInputData.uChunks;
+	float* centroid = NULL; // (unsigned*) malloc(sizeof(float) * (oInputData.n_chunks));;
+	load_bin<float>(centroid_file, centroid, numr, numc);				//Import centroid from centroid file
+	cout << "Loaded:" <<  centroid_file << endl;
 
+	gpuErrchk(cudaMalloc(&oInputData.d_pqTable, sizeof(float) * (256*oInputData.D)));
+	gpuErrchk(cudaMalloc(&oInputData.d_chunksOffset, sizeof(unsigned) * (oInputData.uChunks+1)));
+	gpuErrchk(cudaMalloc(&oInputData.d_centroid, sizeof(float) * (oInputData.D)));
+
+	// host to device transfer
+	gpuErrchk(cudaMemcpy(oInputData.d_pqTable, pqTable_T, sizeof(float) * (256*oInputData.D), cudaMemcpyHostToDevice));
+	gpuErrchk(cudaMemcpy(oInputData.d_chunksOffset, chunksOffset, sizeof(unsigned) * (oInputData.uChunks+1), cudaMemcpyHostToDevice));
+	gpuErrchk(cudaMemcpy(oInputData.d_centroid, centroid, sizeof(float) * (oInputData.D), cudaMemcpyHostToDevice));
+
+	free(pqTable);
+	pqTable = NULL;
 	free(pqTable_T);
 	pqTable_T = NULL;
 	free(chunksOffset);
@@ -266,147 +249,237 @@ template void bang_load<uint8_t>(char* );
 
 void bang_load_c(char* pszPath)
 {
+	// ToDo: Add other datatypes
 	bang_load<uint8_t>(pszPath);
 }
+
+template<typename T>
+void bang_alloc(int numQueries)
+{
+	// Assignments needed for determining allocation sizes
+	const unsigned uMAX_PARENTS_PERQUERY = (oSearchParams.worklist_length + NAX_EXTRA_ITERATION) ;
+	oHostInst.FPSetCoords_size = oInputData.D  ;
+	oHostInst.FPSetCoords_size_bytes = oHostInst.FPSetCoords_size * sizeof(T);
+	oHostInst.FPSetCoords_rowsize = oHostInst.FPSetCoords_size * numQueries;
+	oHostInst.FPSetCoords_rowsize_bytes = oHostInst.FPSetCoords_size_bytes * numQueries;
+
+	
+	// Allocations on GPU
+	gpuErrchk(cudaMalloc(&oGPUInst.d_queriesFP, sizeof(T) * (numQueries*oInputData.D)));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_nearestNeighbours, (oSearchParams.recall * numQueries) * sizeof(result_ann_t) ));// Dim: [recall_at * numQueries]
+	gpuErrchk(cudaMalloc(&oGPUInst.d_pqDistTables, sizeof(float) * (256*oInputData.uChunks*numQueries)));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_BestLSetsDist, sizeof(float) * (numQueries*(oSearchParams.worklist_length))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_BestLSets_count, sizeof(unsigned) * (numQueries)));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_BestLSets_visited, sizeof(bool) * (numQueries* (oSearchParams.worklist_length))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_BestLSets, sizeof(unsigned) * (numQueries* (oSearchParams.worklist_length))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_parents, sizeof(unsigned) * (numQueries*(SIZEPARENTLIST))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_neighbors, sizeof(unsigned) * (numQueries*(oInputData.R+1))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_neighbors_temp, sizeof(unsigned) * (numQueries*(oInputData.R+1))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_neighbors_aux, sizeof(unsigned) * (numQueries*(oInputData.R+1))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_numNeighbors_query, sizeof(unsigned) * (numQueries)));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_numNeighbors_query_temp, sizeof(unsigned) * (numQueries)));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_neighborsDist_query, sizeof(float) * (numQueries*(oInputData.R+1))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_neighborsDist_query_aux, sizeof(float) * (numQueries*(oInputData.R+1))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_processed_bit_vec, sizeof(bool)*BF_MEMORY*numQueries));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_nextIter, sizeof(bool)));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_iter, sizeof(unsigned)));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_mark, sizeof(unsigned) * (numQueries)));			// ~40KB
+	gpuErrchk(cudaMalloc(&oGPUInst.d_FPSetCoordsList_Counts, numQueries * sizeof(unsigned) ));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_FPSetCoordsList, (uMAX_PARENTS_PERQUERY * numQueries) * oHostInst.FPSetCoords_size_bytes )); // Dim: [numIterations * numQueries]
+	gpuErrchk(cudaMalloc(&oGPUInst.d_L2distances, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(float) )); // Dim: [numIterations * numQueries]
+	gpuErrchk(cudaMalloc(&oGPUInst.d_L2ParentIds, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(unsigned) )); // Dim: [numIterations * numQueries]
+	gpuErrchk(cudaMalloc(&oGPUInst.d_L2distances_aux, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(float) )); // Dim: [numIterations * numQueries]
+	gpuErrchk(cudaMalloc(&oGPUInst.d_L2ParentIds_aux, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(unsigned) )); // Dim: [numIterations * numQueries]
+
+	// Default stream computations or transfers cannot be overalapped with operations on other streams
+	// Hence creating separate streams for transfers and computations to achieve overlap
+	// memory transfers overlap with all kernel executions
+	gpuErrchk(cudaStreamCreate(&oGPUInst.streamFPTransfers));
+	gpuErrchk(cudaStreamCreate(&oGPUInst.streamParent));
+	gpuErrchk(cudaStreamCreate(&oGPUInst.streamChildren));
+	gpuErrchk(cudaStreamCreate(&oGPUInst.streamKernels));
+
+	// Host size params
+	oHostInst.numCPUthreads = 64;//64 // ToDo: get this dynamically from the platform
+
+	// Host Memory Allocation
+	gpuErrchk(cudaMallocHost(&oHostInst.neighbors, sizeof(unsigned) * (numQueries*(oInputData.R+1))) );
+	// Note : R+1 is needed because MEDOID is added as additional neighbour in very first neighbour fetching (iteration)
+	gpuErrchk(cudaMallocHost(&oHostInst.numNeighbors_query,sizeof(unsigned) * (numQueries) ));
+	gpuErrchk(cudaMallocHost(&oHostInst.parents,sizeof(unsigned) * numQueries * (SIZEPARENTLIST)));
+	//oHostInst.L2ParentIds = (unsigned*)malloc(sizeof(unsigned) * numQueries);
+	//oHostInst.FPSetCoordsList_Counts = (unsigned*)malloc(sizeof(unsigned) * numQueries);
+	gpuErrchk(cudaMallocHost(&oHostInst.FPSetCoordsList, (uMAX_PARENTS_PERQUERY * numQueries) * oHostInst.FPSetCoords_size_bytes));
+}
+template void bang_alloc<float>(int  );
+template void bang_alloc<uint8_t>(int  );
+
+
+// Note:To be called after setSearchparams
+// Set-up params and pre-compute as much we can before the actural query processing can begin
+template<typename T>
+void bang_init(int numQueries)
+{
+
+	// Initialize GPU related attributes
+	oGPUInst.numThreads_K4 = 1; //	compute_parent kernel
+	oGPUInst.numThreads_K1 = 256;//	populate_pqDist_par
+	oGPUInst.numThreads_K2 = 512;// compute_neighborDist_par
+//	oGPUInst.numThreads_K3_merge = 2*L;
+	oGPUInst.numThreads_K3 = oInputData.R+1;
+	oGPUInst.K4_blockSize = 256;
+	oGPUInst.numThreads_K5 = 256;// neighbor_filtering_new
+	oGPUInst.numThreads_K3_merge = 2*oSearchParams.worklist_length;
+	assert(oGPUInst.numThreads_K3_merge <= 1024);	// Max thread block size
+	gpuErrchk(cudaMemset(oGPUInst.d_iter,0,sizeof(unsigned)));
+
+	gpuErrchk(cudaMemset(oGPUInst.d_pqDistTables,0,sizeof(float) * (oInputData.uChunks * 256 * numQueries)));
+	gpuErrchk(cudaMemset(oGPUInst.d_processed_bit_vec, 0, sizeof(bool)*BF_MEMORY*numQueries));
+	gpuErrchk(cudaMemset(oGPUInst.d_parents, 0, sizeof(unsigned)*(numQueries*(SIZEPARENTLIST))));
+	gpuErrchk(cudaMemset(oGPUInst.d_BestLSets_count, 0, sizeof(unsigned)*(numQueries)));
+	gpuErrchk(cudaMemset(oGPUInst.d_mark, 1, sizeof(unsigned)*(numQueries))); // ToDo, should be 0?
+	gpuErrchk(cudaMemset(oGPUInst.d_neighborsDist_query,0,sizeof(float) * (numQueries*(oInputData.R+1))));
+
+	// As we know the Medoid is the first parent, lets get started with working extracting its neighbours
+	T* FPSetCoordsList = (T*)oHostInst.FPSetCoordsList;
+	T* d_FPSetCoordsList = (T*)oGPUInst.d_FPSetCoordsList;
+	unsigned* L2ParentIds = (unsigned*)malloc(sizeof(unsigned) * numQueries);
+	unsigned* FPSetCoordsList_Counts = (unsigned*)malloc(sizeof(unsigned) * numQueries);
+	// Very first iteration starts with Medoid as the parent/candidate in all Queries
+	for (int i = 0 ; i < numQueries; i++)
+	{
+		L2ParentIds[i] = oInputData.MEDOID;
+		FPSetCoordsList_Counts[i] = 1;
+	}
+	// Transfer the Medoid (seed parent) default first parent
+	gpuErrchk(cudaMemcpy(oGPUInst.d_L2ParentIds, L2ParentIds, sizeof(unsigned) * numQueries, cudaMemcpyHostToDevice ));
+	gpuErrchk(cudaMemcpy(oGPUInst.d_FPSetCoordsList_Counts, FPSetCoordsList_Counts, sizeof(unsigned) * numQueries, cudaMemcpyHostToDevice ));
+	free(L2ParentIds);
+	free(FPSetCoordsList_Counts);
+
+// ToDo: Fetching the neighbours of Medoid and transferring them to GPU can be moved to Load Phase
+	unsigned* puNumNeighbours = (unsigned*)( oInputData.pIndex + ((oInputData.ullIndex_Entry_LEN * oInputData.MEDOID)
+								+ (oInputData.D*sizeof(T))) );
+
+	unsigned medoidDegree = *puNumNeighbours;
+	unsigned* puNeighbour = puNumNeighbours + 1;
+	vector<unsigned> medoidNeighbors;
+	unsigned uMaxNeighbors =  oInputData.R+1;
+	for(unsigned long long ii = 0; ii < medoidDegree; ++ii)
+	{
+		medoidNeighbors.push_back(puNeighbour[ii]);
+	}
+
+	unsigned iter = 1; // Note 1-based not 0
+	// [2] Setting the neighbors of medoid as initial candidate neighbors for the query point
+	for(unsigned ii=0; ii < numQueries; ++ii ) {
+		oHostInst.neighbors[ii * uMaxNeighbors] = oInputData.MEDOID; // conside medoid also as initial neighbour
+		unsigned numNeighbors = 1; // medoid is already inserted
+		for (unsigned i = 0; i < medoidDegree; ++i) {
+			oHostInst.neighbors[ii * uMaxNeighbors + i + 1] = medoidNeighbors[i];
+			numNeighbors++;
+		}
+
+		oHostInst.numNeighbors_query[ii] = numNeighbors;
+
+		// Copy the medoid's FP vectors Async (row 0) iter = 1 here.
+		memcpy(FPSetCoordsList + ((iter-1) * oHostInst.FPSetCoords_rowsize) + (ii*oHostInst.FPSetCoords_size),
+				oInputData. pIndex + (oInputData.ullIndex_Entry_LEN * oInputData.MEDOID) ,
+				oHostInst.FPSetCoords_size_bytes);
+	}
+
+	// 0th row in FPSetCoordsListget copied to GPU in Async fashion
+	cudaMemcpy(d_FPSetCoordsList + ((iter-1) * oHostInst.FPSetCoords_rowsize),
+					FPSetCoordsList + ((iter-1)* oHostInst.FPSetCoords_rowsize),
+					oHostInst.FPSetCoords_rowsize_bytes,
+					cudaMemcpyHostToDevice);
+
+
+	// Transfer neighbor IDs and count to GPU
+	gpuErrchk(cudaMemcpy(oGPUInst.d_neighbors_temp, oHostInst.neighbors, sizeof(unsigned) * numQueries*(oInputData.R+1), cudaMemcpyHostToDevice));
+	gpuErrchk(cudaMemcpy(oGPUInst.d_numNeighbors_query_temp, oHostInst.numNeighbors_query, sizeof(unsigned) * (numQueries), cudaMemcpyHostToDevice));
+}
+template void bang_init<float>(int  );
+template void bang_init<uint8_t>(int  );
+
+
+void bang_free()
+{
+	gpuErrchk(cudaFree(oGPUInst.d_queriesFP));
+	gpuErrchk(cudaFree(oGPUInst.d_nearestNeighbours));
+	gpuErrchk(cudaFree(oGPUInst.d_pqDistTables));
+	gpuErrchk(cudaFree(oGPUInst.d_BestLSetsDist));
+	gpuErrchk(cudaFree(oGPUInst.d_BestLSets_visited));
+	gpuErrchk(cudaFree(oGPUInst.d_BestLSets_count));
+	gpuErrchk(cudaFree(oGPUInst.d_BestLSets));
+	gpuErrchk(cudaFree(oGPUInst.d_parents));
+	gpuErrchk(cudaFree(oGPUInst.d_neighbors));
+	gpuErrchk(cudaFree(oGPUInst.d_neighbors_temp));
+	gpuErrchk(cudaFree(oGPUInst.d_neighbors_aux));
+	gpuErrchk(cudaFree(oGPUInst.d_numNeighbors_query));
+	gpuErrchk(cudaFree(oGPUInst.d_numNeighbors_query_temp));
+	gpuErrchk(cudaFree(oGPUInst.d_neighborsDist_query));
+	gpuErrchk(cudaFree(oGPUInst.d_neighborsDist_query_aux));
+	gpuErrchk(cudaFree(oGPUInst.d_processed_bit_vec));
+	gpuErrchk(cudaFree(oGPUInst.d_nextIter));
+	gpuErrchk(cudaFree(oGPUInst.d_iter));
+	gpuErrchk(cudaFree(oGPUInst.d_mark));
+	gpuErrchk(cudaFree(oGPUInst.d_FPSetCoordsList_Counts));
+	gpuErrchk(cudaFree(oGPUInst.d_FPSetCoordsList));
+	gpuErrchk(cudaFree(oGPUInst.d_L2distances));
+	gpuErrchk(cudaFree(oGPUInst.d_L2ParentIds));
+	gpuErrchk(cudaFree(oGPUInst.d_L2distances_aux));
+	gpuErrchk(cudaFree(oGPUInst.d_L2ParentIds_aux));
+
+
+	cudaStreamDestroy(oGPUInst.streamFPTransfers);
+	cudaStreamDestroy(oGPUInst.streamKernels);
+	cudaStreamDestroy(oGPUInst.streamParent);
+	cudaStreamDestroy(oGPUInst.streamChildren);
+
+	gpuErrchk(cudaFreeHost(oHostInst.neighbors));
+	gpuErrchk(cudaFreeHost(oHostInst.numNeighbors_query));
+	gpuErrchk(cudaFreeHost(oHostInst.parents));
+	gpuErrchk(cudaFreeHost(oHostInst.FPSetCoordsList));
+}
+
 
 void bang_unload()
 {
 	printf("Bang Unload \n");
-
-	int nRetIndex = munlock(objIndexLoad.pIndex, objIndexLoad.size_indexfile);
-	if (nRetIndex)
-		perror("Index File unlock\n");
-	
-	free(objIndexLoad.pIndex);
-	gpuErrchk(cudaFree(objIndexLoad.d_compressedVectors));
-	gpuErrchk(cudaFree(objIndexLoad.d_pqTable));
-	gpuErrchk(cudaFree(objIndexLoad.d_chunksOffset));
-	gpuErrchk(cudaFree(objIndexLoad.d_centroid));
-
+	free(oInputData.pIndex);
+	gpuErrchk(cudaFree(oInputData.d_compressedVectors));
+	gpuErrchk(cudaFree(oInputData.d_pqTable));
+	gpuErrchk(cudaFree(oInputData.d_chunksOffset));
+	gpuErrchk(cudaFree(oInputData.d_centroid));
 }
 
 void bang_set_searchparams(int recall, int worklist_length, DistFunc nDistFunc)
 {
-	objSearchParams.recall = recall;
-	objSearchParams.worklist_length = worklist_length;
-	objSearchParams.uDistFunc = nDistFunc;
+	oSearchParams.recall = recall;
+	oSearchParams.worklist_length = worklist_length;
+	oSearchParams.uDistFunc = nDistFunc;
 }
 
 void bang_set_searchparams_c(int recall, int worklist_length, DistFunc nDistFunc)
 {
-	objSearchParams.recall = recall;
-	objSearchParams.worklist_length = worklist_length;
-	objSearchParams.uDistFunc = nDistFunc;
+	oSearchParams.recall = recall;
+	oSearchParams.worklist_length = worklist_length;
+	oSearchParams.uDistFunc = nDistFunc;
+	assert(oSearchParams.worklist_length <= MAX_L);	// Max thread block size
 }
 
 template<typename T>
-void bang_query(T* query_array, int num_queries,
+void bang_query(T* queriesFP, int numQueries,
 					result_ann_t* nearestNeighbours,
 					float* nearestNeighbours_dist )
 {
-	
-	unsigned numQueries = num_queries;
-	unsigned recall_at = objSearchParams.recall; // 10
 
-	// Kernel threadblock sizes
-	unsigned numThreads_K4 = 1; //	compute_parent kernel
-	unsigned numThreads_K1 = 256;//	populate_pqDist_par
-	unsigned numThreads_K2 = 512;// compute_neighborDist_par
-	unsigned numThreads_K3_merge = 2*L;
-	assert(numThreads_K3_merge <= 1024);	// Max thread block size
-	unsigned numThreads_K3 = objIndexLoad.R+1;
-	unsigned K4_blockSize = 256;
-	unsigned numThreads_K5 = 256;// neighbor_filtering_new
-	unsigned numCPUthreads = 64;//64 // ToDo: get this dynamically from the platform
+	T* FPSetCoordsList = (T*) oHostInst.FPSetCoordsList;
+	T *d_queriesFP = (T*)oGPUInst.d_queriesFP;
+	T* d_FPSetCoordsList = (T*)oGPUInst.d_FPSetCoordsList; // M x N
 
-	// Assign Capabilites
-	unsigned bitCapabilities = 1;// 1,2,4,8,..
-	bool bEnableGPUStats = false;
-
-
-	if (bitCapabilities & ENABLE_GPU_STATS)
-		bEnableGPUStats = true;
-
-	printf("BF Memory = %u BF_ENTRIES = %u\n",BF_MEMORY, BF_ENTRIES);
-
-	unsigned long long MEDOID = objIndexLoad.MEDOID;
-	unsigned D  = objIndexLoad.D; // Dimensions
-	unsigned R  = objIndexLoad.R; // Grap Out Degree
-
-	T* queriesFP = query_array;
-
-	// CPU Data Structs
-	unsigned *neighbors = NULL;
-	unsigned *numNeighbors_query = NULL;
-	unsigned *parents = NULL;
-	const unsigned long long FPSetCoords_size_bytes = D * sizeof(T);
-	const unsigned long long FPSetCoords_rowsize_bytes = FPSetCoords_size_bytes * numQueries;
-	const unsigned long long FPSetCoords_size = D ;
-	const unsigned long long FPSetCoords_rowsize = FPSetCoords_size * numQueries;
-	T* FPSetCoordsList = NULL;
-
-	gpuErrchk(cudaMallocHost(&neighbors, sizeof(unsigned) * (numQueries*(R+1))) );
-	// Note : R+1 is needed because MEDOID is added as additional neighbour in very first neighbour fetching (iteration)
-	gpuErrchk(cudaMallocHost(&numNeighbors_query,sizeof(unsigned) * (numQueries) ));
-	gpuErrchk(cudaMallocHost(&parents,sizeof(unsigned) * numQueries * (SIZEPARENTLIST)));
-
-	// GPU Data Structs
-	float *d_pqDistTables = NULL;
-	float *d_BestLSetsDist = NULL;
-	float *d_neighborsDist_query = NULL;
-	float *d_neighborsDist_query_aux = NULL;
-	T *d_queriesFP = NULL;
-	unsigned *d_BestLSets = NULL;
-	unsigned *d_neighbors = NULL;
-	unsigned *d_neighbors_aux = NULL;
-	unsigned *d_parents = NULL;
-	unsigned *d_numNeighbors_query = NULL;
-	unsigned *d_BestLSets_count = NULL;
-	unsigned *d_iter = NULL;
-	unsigned *d_neighbors_temp = NULL;
-	unsigned *d_numNeighbors_query_temp = NULL;
-	unsigned *d_recall = NULL;
-	unsigned *d_mark = NULL;
-	bool *d_BestLSets_visited = NULL;
-	bool *d_nextIter = NULL;
-	bool *d_processed_bit_vec = NULL;
-	unsigned* d_numQueries = NULL;
-	
-	// The FP vectors corresponding to each candidate is fetched asynchronously for all the queries in the iteration.
-	// This FP vectors are used in the Re-ranking step at the endo of search iterations
-	// A 2D array is used to store the FP vectors.
-
-	// 2D array format
-	// [FP for Q1] [FP for Q2]...[FP for QN]
-	// [FP for Q1] [FP for Q2]...[FP for QN]
-	// ..
-	// [FP for Q1] [FP for Q2]...[FP for QN] total M such entries (rows)
-	
-	// Every iteration: [1 * numQuereis] row added
-	// Dimensoins of 2D array : [numIterations * numQueries]
-	// numIterations upper bound is MAX_PARENTS_PERQUERY
-	T* d_FPSetCoordsList = NULL; // M x N
-	// Indicates how many entries are present per query
-
-	// For every query, the total number of candidates present.
-	unsigned* d_FPSetCoordsList_Counts = NULL; // Size is N i.e. number of queries
-
-	// Corresponding to the FP vectors 2d Array, we have identically sized 2D arrays to 
-	// store the IDs of the candidates and their exact/L2 distances
-	float* d_L2distances = NULL; // M x N dimensions
-	unsigned* d_L2ParentIds = NULL; // // M x N dimensions
-	float* d_L2distances_aux = NULL; // M x N dimensions
-	unsigned* d_L2ParentIds_aux = NULL; // // M x N dimensions
-
-	// The findal ANNs returned to the user application. Some clients 
-	result_ann_t *d_nearestNeighbours = NULL;
-
-	//  Specific Streams for 
- 	cudaStream_t streamFPTransfers; // H2D
- 	cudaStream_t streamParent; // D2H
- 	cudaStream_t streamChildren; // H2D
-	cudaStream_t streamKernels; // kernels executions
-
+#ifdef _TIMERS
 	// GPU execution times
 	double time_transfer = 0.0f;
 	double time_K1 = 0.0f;
@@ -420,244 +493,163 @@ void bang_query(T* query_array, int num_queries,
 	vector<double> time_B1_vec;
 	vector<double> time_B2_vec;
 	time_B2_vec.push_back(0.0);
+#endif
 
 	bool nextIter = false;
 	unsigned iter = 1; // Note 1-based not 0
+	//unsigned uMaxNeighbors =  (oInputData.R+1);
 
-	unsigned offset =  (R+1);
-	
-	// Allocations on GPU
-	gpuErrchk(cudaMalloc(&d_processed_bit_vec, sizeof(bool)*BF_MEMORY*numQueries));
-	gpuErrchk(cudaMalloc(&d_nextIter, sizeof(bool)));
-	gpuErrchk(cudaMalloc(&d_iter, sizeof(unsigned)));
-	gpuErrchk(cudaMemset(d_iter,0,sizeof(unsigned)));
-	gpuErrchk(cudaMalloc(&d_pqDistTables, sizeof(float) * (256*objIndexLoad.uChunks*numQueries)));
-	gpuErrchk(cudaMalloc(&d_queriesFP, sizeof(T) * (numQueries*D)));
-	gpuErrchk(cudaMalloc(&d_neighbors_aux, sizeof(unsigned) * (numQueries*(R+1))));
-	gpuErrchk(cudaMalloc(&d_numNeighbors_query, sizeof(unsigned) * (numQueries)));
-	gpuErrchk(cudaMalloc(&d_neighborsDist_query, sizeof(float) * (numQueries*(R+1))));
-	gpuErrchk(cudaMalloc(&d_neighborsDist_query_aux, sizeof(float) * (numQueries*(R+1))));
-	gpuErrchk(cudaMalloc(&d_parents, sizeof(unsigned) * (numQueries*(SIZEPARENTLIST))));
-	gpuErrchk(cudaMalloc(&d_neighbors, sizeof(unsigned) * (numQueries*(R+1))));
-	gpuErrchk(cudaMalloc(&d_neighbors_temp, sizeof(unsigned) * (numQueries*(R+1))));
-	gpuErrchk(cudaMalloc(&d_numNeighbors_query_temp, sizeof(unsigned) * (numQueries)));
-	gpuErrchk(cudaMalloc(&d_BestLSets_count, sizeof(unsigned) * (numQueries)));
-	gpuErrchk(cudaMalloc(&d_mark, sizeof(unsigned) * (numQueries)));			// ~40KB
-	gpuErrchk(cudaMalloc(&d_FPSetCoordsList_Counts, numQueries * sizeof(unsigned) ));
-	gpuErrchk(cudaMalloc(&d_nearestNeighbours, (recall_at * numQueries) * sizeof(result_ann_t) ));// Dim: [recall_at * numQueries]
-	gpuErrchk(cudaMalloc(&d_numQueries,sizeof(unsigned)));
-	gpuErrchk(cudaMalloc(&d_recall,sizeof(unsigned)));
-	gpuErrchk(cudaMemcpy(d_recall, &recall_at, sizeof(unsigned), cudaMemcpyHostToDevice));
-	gpuErrchk(cudaMemcpy(d_numQueries, &numQueries, sizeof(unsigned), cudaMemcpyHostToDevice ));
+#ifdef _TIMERS
+	GPUTimer gputimer (streamKernels, true);	// Initiating the GPUTimer class object
+#endif
 
+	const unsigned uMAX_PARENTS_PERQUERY = (oSearchParams.worklist_length + NAX_EXTRA_ITERATION) ; //Needs to be set with expereince. set it to (2*L) if in doubt
 
-	// Default stream computations or transfers cannot be overalapped with operations on other streams
-	// Hence creating separate streams for transfers and computations to achieve overlap
-	// memory transfers overlap with all kernel executions
-	gpuErrchk(cudaStreamCreate(&streamFPTransfers));
-	gpuErrchk(cudaStreamCreate(&streamParent));
-	gpuErrchk(cudaStreamCreate(&streamChildren));
-	gpuErrchk(cudaStreamCreate(&streamKernels));
+	omp_set_num_threads(oHostInst.numCPUthreads);
 
-	GPUTimer gputimer (streamKernels,!bEnableGPUStats);	// Initiating the GPUTimer class object
-
-	// Transfer the Medoid (seed parent) default first parent
-	unsigned* L2ParentIds = (unsigned*)malloc(sizeof(unsigned) * numQueries);
-	unsigned* FPSetCoordsList_Counts = (unsigned*)malloc(sizeof(unsigned) * numQueries);
-
-
-	// Worklist length (varying this will vary the final recall)
-	unsigned uWLLen = objSearchParams.worklist_length;
-
-	assert(uWLLen <= L);	// Max thread block size
-	numThreads_K3_merge = 2*uWLLen;
-	assert(numThreads_K3_merge <= 1024);	// Max thread block size
-
-	const unsigned uMAX_PARENTS_PERQUERY = (uWLLen + 50) ; //Needs to be set with expereince. set it to (2*L) if in doubt
-	assert ( uMAX_PARENTS_PERQUERY <= MAX_PARENTS_PERQUERY);
-
-	gpuErrchk(cudaMallocHost(&FPSetCoordsList, (uMAX_PARENTS_PERQUERY * numQueries) * FPSetCoords_size_bytes));
-	gpuErrchk(cudaMalloc(&d_FPSetCoordsList, (uMAX_PARENTS_PERQUERY * numQueries) * FPSetCoords_size_bytes )); // Dim: [numIterations * numQueries]
-	gpuErrchk(cudaMalloc(&d_L2distances, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(float) )); // Dim: [numIterations * numQueries]
-	gpuErrchk(cudaMalloc(&d_L2ParentIds, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(unsigned) )); // Dim: [numIterations * numQueries]
-	gpuErrchk(cudaMalloc(&d_L2distances_aux, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(float) )); // Dim: [numIterations * numQueries]
-	gpuErrchk(cudaMalloc(&d_L2ParentIds_aux, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(unsigned) )); // Dim: [numIterations * numQueries]
-	gpuErrchk(cudaMalloc(&d_BestLSets_visited, sizeof(bool) * (numQueries* (uWLLen))));
-	gpuErrchk(cudaMalloc(&d_BestLSetsDist, sizeof(float) * (numQueries*(uWLLen))));
-	gpuErrchk(cudaMalloc(&d_BestLSets, sizeof(unsigned) * (numQueries* (uWLLen))));
-
-	// Very first iteration starts with Medoid as the parent/candidate in all Queries
-	for (int i = 0 ; i < numQueries; i++)
-	{
-		L2ParentIds[i] = objIndexLoad.MEDOID;
-		FPSetCoordsList_Counts[i] = 1;
-	}
-
-	gpuErrchk(cudaMemset(d_pqDistTables,0,sizeof(float) * (objIndexLoad.uChunks * 256 * numQueries)));
-	gpuErrchk(cudaMemset(d_processed_bit_vec, 0, sizeof(bool)*BF_MEMORY*numQueries));
-	gpuErrchk(cudaMemset(d_parents, 0, sizeof(unsigned)*(numQueries*(SIZEPARENTLIST))));
-	gpuErrchk(cudaMemset(d_BestLSets_count, 0, sizeof(unsigned)*(numQueries)));
-	gpuErrchk(cudaMemset(d_mark, 1, sizeof(unsigned)*(numQueries)));
-	gpuErrchk(cudaMemcpy(d_L2ParentIds, L2ParentIds, sizeof(unsigned) * numQueries, cudaMemcpyHostToDevice ));
-	gpuErrchk(cudaMemcpy(d_FPSetCoordsList_Counts, FPSetCoordsList_Counts, sizeof(unsigned) * numQueries, cudaMemcpyHostToDevice ));
-
-	// ToDo: Fetching the neighbours of Medoid and transferring them to GPU can be moved to Load Phase
-	unsigned* puNumNeighbours = (unsigned*)( objIndexLoad.pIndex + ((objIndexLoad.ullIndex_Entry_LEN * objIndexLoad.MEDOID)
-								+ (D*sizeof(T))) );
-
-	unsigned medoidDegree = *puNumNeighbours;
-	unsigned* puNeighbour = puNumNeighbours + 1;
-	vector<unsigned> medoidNeighbors;
-
-	for(unsigned long long ii = 0; ii < medoidDegree; ++ii)
-	{
-		medoidNeighbors.push_back(puNeighbour[ii]);
-	}
-
-
-	// [2] Setting the neighbors of medoid as initial candidate neighbors for the query point
-	for(unsigned ii=0; ii < numQueries; ++ii ) {
-		neighbors[ii * offset] = objIndexLoad.MEDOID; // conside medoid also as initial neighbour
-		unsigned numNeighbors = 1; // medoid is already inserted
-		for (unsigned i = 0; i < medoidDegree; ++i) {
-			neighbors[ii * offset + i + 1] = medoidNeighbors[i];
-			numNeighbors++;
-		}
-
-		numNeighbors_query[ii] = numNeighbors;
-		// Copy the medoid's FP vectors Async (row 0) iter = 1 here.
-		memcpy(FPSetCoordsList + ((iter-1) * FPSetCoords_rowsize) + (ii*FPSetCoords_size),
-				objIndexLoad. pIndex + (objIndexLoad.ullIndex_Entry_LEN * objIndexLoad.MEDOID) ,
-				FPSetCoords_size_bytes);
-	}
-
-	// 0th row in FPSetCoordsListget copied to GPU in Async fashion
-	cudaMemcpyAsync(d_FPSetCoordsList + ((iter-1) * FPSetCoords_rowsize),
-					FPSetCoordsList + ((iter-1)* FPSetCoords_rowsize),
-					FPSetCoords_rowsize_bytes,cudaMemcpyHostToDevice,streamFPTransfers);
-
-
-	gputimer.Start();
-
-	// Transfer neighbor IDs and count to GPU
-	gpuErrchk(cudaMemcpy(d_neighbors_temp, neighbors, sizeof(unsigned) * numQueries*(R+1), cudaMemcpyHostToDevice));
-	gpuErrchk(cudaMemcpy(d_numNeighbors_query_temp, numNeighbors_query, sizeof(unsigned) * (numQueries), cudaMemcpyHostToDevice));
-	gputimer.Stop();
-	time_transfer += gputimer.Elapsed();
-
-	omp_set_num_threads(numCPUthreads);
-
+	#ifdef _TIMERS
 	auto milliStart = log_message("SEARCH STARTED");
 	auto start = std::chrono::high_resolution_clock::now();
+	#endif
 
-	gpuErrchk(cudaMemcpy(d_queriesFP, queriesFP, sizeof(T) * (D*numQueries), cudaMemcpyHostToDevice));
+	gpuErrchk(cudaMemcpy(d_queriesFP, queriesFP, sizeof(T) * (oInputData.D*numQueries), cudaMemcpyHostToDevice));
+
+#ifdef _TIMERS
 	auto stop = std::chrono::high_resolution_clock::now();
 	time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
 	gputimer.Start();
+#endif
 	/**
 	 * [3] Launching the kernel with "numQueries" number of thread-blocks and user specified "numThreads_K1" block size.
 	 * One thread block is assigned to a query, i.e., "numThreads_K1" threads perform the computation for a query.
 	 */
-	populate_pqDist_par<<<numQueries, numThreads_K1, (D*(sizeof(float)+sizeof(T))), streamKernels>>> (
-							objIndexLoad.d_pqTable,
-							d_pqDistTables,
+	populate_pqDist_par<<<numQueries, oGPUInst.numThreads_K1, (oInputData.D*(sizeof(float)+sizeof(T))), oGPUInst.streamKernels>>> (
+							oInputData.d_pqTable,
+							oGPUInst.d_pqDistTables,
 							d_queriesFP,
-							objIndexLoad.d_chunksOffset,
-							objIndexLoad.d_centroid,
-							objIndexLoad.uChunks,
-							D,
-							objSearchParams.uDistFunc == ENUM_DIST_MIPS ? MIPS_EXTRA_DIM : 0);
+							oInputData.d_chunksOffset,
+							oInputData.d_centroid,
+							oInputData.uChunks,
+							oInputData.D,
+							oSearchParams.uDistFunc == ENUM_DIST_MIPS ? MIPS_EXTRA_DIM : 0);
+#ifdef _TIMERS
 	gputimer.Stop();
 	time_K1 += gputimer.Elapsed();
 
 	gputimer.Start();
-	gpuErrchk(cudaMemset(d_numNeighbors_query, 0, sizeof(unsigned)*numQueries));
+#endif
+
+	gpuErrchk(cudaMemset(oGPUInst.d_numNeighbors_query, 0, sizeof(unsigned)*numQueries));
 	/** [4] Launching the kernel with "numQueries" number of thread-blocks and block size of 256
 	 * One thread block is assigned to a query, i.e., 256 threads perform the computation for a query. The block size has been tuned for performance.
 	 */
-	neighbor_filtering_new<<<numQueries, numThreads_K5, 0, streamKernels >>> (d_neighbors, d_neighbors_temp, d_numNeighbors_query, d_numNeighbors_query_temp, d_processed_bit_vec,R);
+	neighbor_filtering_new<<<numQueries, oGPUInst.numThreads_K5, 0, oGPUInst.streamKernels >>> (oGPUInst.d_neighbors, oGPUInst.d_neighbors_temp, oGPUInst.d_numNeighbors_query,
+				oGPUInst.d_numNeighbors_query_temp, oGPUInst.d_processed_bit_vec,oInputData.R);
+
+#ifdef _TIMERS
 	gputimer.Stop();
 	time_neighbor_filtering += gputimer.Elapsed() ;
 
 	gputimer.Start();
+#endif
 
 	/** [5] Launching the kernel with "numQueries" number of thread-blocks and user specified "numThreads_K2" block size.
 	 * One thread block is assigned to a query, i.e., "numThreads_K2" threads perform the computation for a query.
 	 */
-	compute_neighborDist_par <<<numQueries, numThreads_K2,0, streamKernels >>> (d_neighbors, d_numNeighbors_query, objIndexLoad. d_compressedVectors,
-	d_pqDistTables, d_neighborsDist_query, objIndexLoad.uChunks, R);
-	gpuErrchk(cudaMemcpy(d_iter, &iter, sizeof(unsigned), cudaMemcpyHostToDevice));
+	compute_neighborDist_par <<<numQueries, oGPUInst.numThreads_K2,0, oGPUInst.streamKernels >>> (oGPUInst.d_neighbors, oGPUInst.d_numNeighbors_query, oInputData.d_compressedVectors,
+	oGPUInst.d_pqDistTables, oGPUInst.d_neighborsDist_query, oInputData.uChunks, oInputData.R);
+	gpuErrchk(cudaMemcpy(oGPUInst.d_iter, &iter, sizeof(unsigned), cudaMemcpyHostToDevice));
 
 	/** [6] Launching the kernel with "X" number of thread-blocks and block size of one. X is calculated below
 	 * A single threads perform the computation for a query.
 	 * Note: The  additional arithmetic in the number of thread blocks it to arrive a ceil value. After assigning a required value
 	 * to numThreads_K4, the division could leat to a truncated quotient, resulting in lesser than expected thread blocks getting spawned.
 	 */
-	compute_parent1<<<(numQueries + numThreads_K4 -1 )/numThreads_K4,numThreads_K4,0, streamKernels >>>(d_neighbors, d_numNeighbors_query, d_neighborsDist_query,
-			d_BestLSets, d_BestLSetsDist, d_BestLSets_visited, d_parents, d_nextIter, d_BestLSets_count, d_mark,
-			d_iter,d_L2ParentIds,d_FPSetCoordsList_Counts, d_numQueries,MEDOID, R);
-		
+	compute_parent1<<<(numQueries + oGPUInst.numThreads_K4 -1 )/oGPUInst.numThreads_K4,oGPUInst.numThreads_K4,0, oGPUInst.streamKernels >>>
+						(oGPUInst.d_neighbors,
+						oGPUInst.d_numNeighbors_query,
+						oGPUInst.d_neighborsDist_query,
+						oGPUInst.d_BestLSets,
+						oGPUInst.d_BestLSetsDist,
+						oGPUInst.d_BestLSets_visited,
+						oGPUInst.d_parents,
+						oGPUInst.d_nextIter,
+						oGPUInst.d_BestLSets_count,
+						oGPUInst.d_mark,
+						oGPUInst.d_iter,
+						oGPUInst.d_L2ParentIds,
+						oGPUInst.d_FPSetCoordsList_Counts,
+						numQueries,
+						oInputData.MEDOID,
+						oInputData.R);
+#ifdef _TIMERS
 	gputimer.Stop();
 	time_B1_vec.push_back(gputimer.Elapsed());
-
+#endif
 	// Loop until all the query have no new parents/candidates
 	do
 	{
 		// Let's wait for all kernels got a chance to execute before we initiate  transfer of the 'd_parents'
-		cudaStreamSynchronize(streamKernels);
-
+		cudaStreamSynchronize(oGPUInst.streamKernels);
+#ifdef _TIMERS
 		start = std::chrono::high_resolution_clock::now();
-
+#endif
 		// Transfer parent IDs from GPU to CPU
-		gpuErrchk(cudaMemcpyAsync(parents, d_parents, sizeof(unsigned) * ((SIZEPARENTLIST)*numQueries),
+		gpuErrchk(cudaMemcpyAsync(oHostInst.parents, oGPUInst.d_parents, sizeof(unsigned) * ((SIZEPARENTLIST)*numQueries),
 									cudaMemcpyDeviceToHost,
-									streamParent));
+									oGPUInst.streamParent));
 
-
+#ifdef _TIMERS
 		stop = std::chrono::high_resolution_clock::now();
 		time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;;
 		gputimer.Start();
+#endif
 		/** [8] Launching the kernel with "numQueries" number of thread-blocks and (R+1) block size.
 		 * One thread block is assigned to a query, i.e., (R+1) threads perform the computation for a query.
 		 * The kernel  sorts an array of size (R+1) per query, so we require (R+1) threads per query.
 		 */
-		compute_BestLSets_par_sort_msort<<<numQueries, numThreads_K3,0, streamKernels >>>(d_neighbors,
-															d_neighbors_aux,
-															d_numNeighbors_query,
-															d_neighborsDist_query,
-															d_neighborsDist_query_aux,
-															d_nextIter, R);
+		compute_BestLSets_par_sort_msort<<<numQueries, oGPUInst.numThreads_K3,0, oGPUInst.streamKernels >>>(oGPUInst.d_neighbors,
+															oGPUInst.d_neighbors_aux,
+															oGPUInst.d_numNeighbors_query,
+															oGPUInst.d_neighborsDist_query,
+															oGPUInst.d_neighborsDist_query_aux,
+															oGPUInst.d_nextIter, oInputData.R);
 
 		/** [9] Launching the kernel with "numQueries" number of thread-blocks and (2*L) block size.
 		 * One thread block is assigned to a query, i.e., (2*L) threads perform the computation for a query.
-		 * The kernel merges, for every query, two arrays each of whose sizes are upperbounded by L, 
+		 * The kernel merges, for every query, two arrays each of whose sizes are upperbounded by L,
 		 * so we require 2*L threads per query.
 		 */
-		compute_BestLSets_par_merge<<<numQueries, numThreads_K3_merge, R*sizeof(float), streamKernels >>>(d_neighbors,
-										d_numNeighbors_query,
-										d_neighborsDist_query,
-										d_BestLSets,
-										d_BestLSetsDist,
-										d_BestLSets_visited,
-										d_parents,
+		compute_BestLSets_par_merge<<<numQueries, oGPUInst.numThreads_K3_merge, (oInputData.R+1)*sizeof(float), oGPUInst.streamKernels >>>(oGPUInst.d_neighbors,
+										oGPUInst.d_numNeighbors_query,
+										oGPUInst.d_neighborsDist_query,
+										oGPUInst.d_BestLSets,
+										oGPUInst.d_BestLSetsDist,
+										oGPUInst.d_BestLSets_visited,
+										oGPUInst.d_parents,
 										iter,
-										d_nextIter,
-										d_BestLSets_count,
-										d_mark,
-										uWLLen,
-										MEDOID,
-										R);
+										oGPUInst.d_nextIter,
+										oGPUInst.d_BestLSets_count,
+										oGPUInst.d_mark,
+										oSearchParams.worklist_length,
+										oInputData.MEDOID,
+										oInputData.R);
+#ifdef _TIMERS
 		gputimer.Stop();
 
 		start = std::chrono::high_resolution_clock::now();
+#endif
 		// Note: This init is very much required. Though it gets updated later but that update does not happen for queries which don't yield parents
-		memset(numNeighbors_query, 0, sizeof(unsigned) * numQueries	);
+		memset(oHostInst.numNeighbors_query, 0, sizeof(unsigned) * numQueries	);
 
-		cudaStreamSynchronize(streamParent);
+		cudaStreamSynchronize(oGPUInst.streamParent);
 
+#ifdef _TIMERS
 		stop = std::chrono::high_resolution_clock::now();
 		time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
 		start = std::chrono::high_resolution_clock::now();
+#endif		
+		unsigned offset =  (oInputData.R+1); // max no of neigbours for a given parent. ToDo : can it be R here? as Medoid is not in picture
 		#pragma omp parallel
 		{
 			// NOTE: USE STACK VARIABLES TO AVOID CONCURRENCY ISSUES
@@ -665,10 +657,10 @@ void bang_query(T* query_array, int num_queries,
 
 			/*Collecting the node ids of neighborhood of the parent nodes to send to GPU */
 			// Note: Only one parent is supported per query. Becasue offset_neighbors is function of
-			// queryID only. To support multiple parents in a query, it should also consider the parent number(jj) within a query 
-			for(unsigned ii=CPUthreadno; ii < numQueries; ii = ii + numCPUthreads)
+			// queryID only. To support multiple parents in a query, it should also consider the parent number(jj) within a query
+			for(unsigned ii=CPUthreadno; ii < numQueries; ii = ii + oHostInst.numCPUthreads)
 			{
-				unsigned numParents = parents[ii*(SIZEPARENTLIST)];
+				unsigned numParents = oHostInst.parents[ii*(SIZEPARENTLIST)];
 
 				#ifdef _DBG_BOUNDS
 				if (numParents > 1)
@@ -677,37 +669,37 @@ void bang_query(T* query_array, int num_queries,
 
 				for(unsigned jj = 1; jj <= numParents; ++jj) //numParents is 1 today
 				{
-					unsigned curreParent = parents[ii*(SIZEPARENTLIST)+jj];;
+					unsigned curreParent = oHostInst.parents[ii*(SIZEPARENTLIST)+jj];;
 					#ifdef _DBG_VERBOSE
 					if (ii == nQueryID)
 					{
 						printf("\n ==> [%d] CPU side: Parent = %d\n", iter, curreParent);
 					}
 					#endif
-					
+
 					unsigned offset_neighbors = ii * offset;
 
 					// Copy the Parent's'FP vectors of current query
-					memcpy(FPSetCoordsList + (iter * FPSetCoords_rowsize) + (ii*FPSetCoords_size),
-							objIndexLoad.pIndex + (objIndexLoad.ullIndex_Entry_LEN * curreParent),
-							FPSetCoords_size_bytes);
+					memcpy(FPSetCoordsList + (iter * oHostInst.FPSetCoords_rowsize) + (ii*oHostInst.FPSetCoords_size),
+							oInputData.pIndex + (oInputData.ullIndex_Entry_LEN * curreParent),
+							oHostInst.FPSetCoords_size_bytes);
 
 					// Extract Neighbour
-					unsigned *puNumNeighbours = (unsigned*)(objIndexLoad.pIndex + ((objIndexLoad.ullIndex_Entry_LEN*curreParent)+(sizeof(T)*D)) );;
+					unsigned *puNumNeighbours = (unsigned*)(oInputData.pIndex + ((oInputData.ullIndex_Entry_LEN*curreParent)+(sizeof(T)*oInputData.D)) );;
 
 					#ifdef _DBG_BOUNDS
 					// validation
-					if (*puNumNeighbours > R)
+					if (*puNumNeighbours > oInputData.R)
 						printf("*** ERROR: NumNeighbours %d which is > R \n",*puNumNeighbours);
 					#endif
 
-					memcpy(neighbors+offset_neighbors, puNumNeighbours+1, (*puNumNeighbours) * sizeof(unsigned));
-					numNeighbors_query[ii] = (*puNumNeighbours);
+					memcpy(oHostInst.neighbors+offset_neighbors, puNumNeighbours+1, (*puNumNeighbours) * sizeof(unsigned));
+					oHostInst.numNeighbors_query[ii] = (*puNumNeighbours);
 				}
 			}
 		}
 		// Lets wait for the two kernels to complete in parallel.
-
+#ifdef _TIMERS
 	    auto stop = std::chrono::high_resolution_clock::now();
 
 		seek_neighbours_time += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
@@ -718,131 +710,154 @@ void bang_query(T* query_array, int num_queries,
 
 		start = std::chrono::high_resolution_clock::now();
 		// Transfer unfiltered neighbors from CPU to GPU
-
-		gpuErrchk(cudaMemcpyAsync(d_neighbors_temp, neighbors, sizeof(unsigned) * numQueries*(R+1),
+#endif
+		gpuErrchk(cudaMemcpyAsync(oGPUInst.d_neighbors_temp, oHostInst.neighbors, sizeof(unsigned) * numQueries*(oInputData.R+1),
 									cudaMemcpyHostToDevice,
-									streamChildren));
+									oGPUInst.streamChildren));
 
-		gpuErrchk(cudaMemcpyAsync(d_numNeighbors_query_temp, numNeighbors_query, sizeof(unsigned) * (numQueries),
+		gpuErrchk(cudaMemcpyAsync(oGPUInst.d_numNeighbors_query_temp, oHostInst.numNeighbors_query, sizeof(unsigned) * (numQueries),
 									cudaMemcpyHostToDevice,
-									streamChildren));
+									oGPUInst.streamChildren));
 
 		// Transfer the FP vectors also from CPU to GPU in Async fashion
-		cudaMemcpyAsync(d_FPSetCoordsList + (iter * FPSetCoords_rowsize),
-					FPSetCoordsList + (iter * FPSetCoords_rowsize),
-					FPSetCoords_rowsize_bytes, cudaMemcpyHostToDevice, streamFPTransfers);
+		cudaMemcpyAsync(d_FPSetCoordsList + (iter * oHostInst.FPSetCoords_rowsize),
+					FPSetCoordsList + (iter * oHostInst.FPSetCoords_rowsize),
+					oHostInst.FPSetCoords_rowsize_bytes, cudaMemcpyHostToDevice, oGPUInst.streamFPTransfers);
 
-		gpuErrchk(cudaMemsetAsync(d_numNeighbors_query, 0, sizeof(unsigned)*numQueries, streamChildren));
-		cudaStreamSynchronize(streamChildren);
+		gpuErrchk(cudaMemsetAsync(oGPUInst.d_numNeighbors_query, 0, sizeof(unsigned)*numQueries, oGPUInst.streamChildren));
+		cudaStreamSynchronize(oGPUInst.streamChildren);
+#ifdef _TIMERS
 		stop = std::chrono::high_resolution_clock::now();
 		time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
 
 		gputimer.Start();
-
+#endif
 		/** [11] Launching the kernel with "numQueries" number of thread-blocks and block size of 256
 		 * One thread block is assigned to a query, i.e., 256 threads perform the computation for a query. The block size has been tuned for performance.
 		 */
-		neighbor_filtering_new<<<numQueries, numThreads_K5,0, streamKernels >>> (d_neighbors,
-																		d_neighbors_temp,
-																		d_numNeighbors_query,
-																		d_numNeighbors_query_temp,
-																		d_processed_bit_vec, R);
+		neighbor_filtering_new<<<numQueries, oGPUInst.numThreads_K5,0, oGPUInst.streamKernels >>> (oGPUInst.d_neighbors,
+																		oGPUInst.d_neighbors_temp,
+																		oGPUInst.d_numNeighbors_query,
+																		oGPUInst.d_numNeighbors_query_temp,
+																		oGPUInst.d_processed_bit_vec, oInputData.R);
+#ifdef _TIMERS
 		gputimer.Stop();
 		time_neighbor_filtering += gputimer.Elapsed() ;
 
 		gputimer.Start();
-		gpuErrchk(cudaMemsetAsync(d_neighborsDist_query,0,sizeof(float) * (numQueries*(R+1)), streamKernels ));
+#endif
+		gpuErrchk(cudaMemsetAsync(oGPUInst.d_neighborsDist_query,0,sizeof(float) * (numQueries*(oInputData.R+1)), oGPUInst.streamKernels ));
 
 		/** [12]vLaunching the kernel with "numQueries" number of thread-blocks and user specified "numThreads_K2" block size.
 		 * One thread block is assigned to a query, i.e., "numThreads_K2" threads perform the computation for a query.
 		 */
-		compute_neighborDist_par <<<numQueries, numThreads_K2,0,streamKernels >>> (d_neighbors, d_numNeighbors_query, objIndexLoad.d_compressedVectors,
-		d_pqDistTables, d_neighborsDist_query, objIndexLoad.uChunks, R);
+		compute_neighborDist_par <<<numQueries, oGPUInst.numThreads_K2,0,oGPUInst.streamKernels >>> (oGPUInst.d_neighbors, oGPUInst.d_numNeighbors_query, oInputData.d_compressedVectors,
+		oGPUInst.d_pqDistTables, oGPUInst.d_neighborsDist_query, oInputData.uChunks, oInputData.R);
 
 		++iter;
 
-		gpuErrchk(cudaMemcpy(d_iter, &iter, sizeof(unsigned), cudaMemcpyHostToDevice));
+		gpuErrchk(cudaMemcpyAsync(oGPUInst.d_iter, &iter, sizeof(unsigned), cudaMemcpyHostToDevice, oGPUInst.streamKernels));
 
 		/** [13] Launching the kernel with "X" number of thread-blocks and block size of one.
 	 	* A songle threads perform the computation for a query.
 		 */
 		// previous d_iter would have transferred by now
-		compute_parent2<<<(numQueries + numThreads_K4 -1 )/numThreads_K4,numThreads_K4,0, streamKernels >>>(d_neighbors, d_numNeighbors_query, d_neighborsDist_query,  d_BestLSets,
-				d_BestLSetsDist, d_BestLSets_visited, d_parents, d_nextIter, d_BestLSets_count, d_mark,
-				d_iter, d_L2ParentIds, d_FPSetCoordsList_Counts, d_numQueries,uWLLen, MEDOID,R);
+		compute_parent2<<<(numQueries + oGPUInst.numThreads_K4 -1 )/oGPUInst.numThreads_K4,oGPUInst.numThreads_K4,0, oGPUInst.streamKernels >>>
+				(oGPUInst.d_neighbors,
+				oGPUInst.d_numNeighbors_query,
+				oGPUInst.d_neighborsDist_query,
+				oGPUInst.d_BestLSets,
+				oGPUInst.d_BestLSetsDist,
+				oGPUInst.d_BestLSets_visited,
+				oGPUInst.d_parents,
+				oGPUInst.d_nextIter,
+				oGPUInst.d_BestLSets_count,
+				oGPUInst.d_mark,
+				oGPUInst.d_iter,
+				oGPUInst.d_L2ParentIds,
+				oGPUInst.d_FPSetCoordsList_Counts,
+				numQueries,
+				oSearchParams.worklist_length,
+				oInputData.MEDOID,
+				oInputData.R);
 
+
+#ifdef _TIMERS
 		gputimer.Stop();
 		time_B1_vec.push_back(gputimer.Elapsed());
 		start = std::chrono::high_resolution_clock::now();
-
-		gpuErrchk(cudaMemcpy(&nextIter, d_nextIter, sizeof(bool), cudaMemcpyDeviceToHost));  //d_nextIter calculated in compute_parent<<< >>>
+#endif
+		gpuErrchk(cudaMemcpyAsync(&nextIter, oGPUInst.d_nextIter, sizeof(bool), cudaMemcpyDeviceToHost, oGPUInst.streamKernels));  //d_nextIter calculated in compute_parent<<< >>>
 		// Note: Default Stream operations (cmputation or memory transfers) cannot overlap with operatiosn on other sterrams.
 		// Hence, the above operation (in deffault stream) could act as a synchronization mechanism to ensure all kernels are done (next parent ready)
 		// before we start seeking neighbours on CPU? If yes, we can avoid the explicit synchronize on streamKernels in the very beginning of the loop
-
+#ifdef _TIMERS
 		stop = std::chrono::high_resolution_clock::now();
 		time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
-
-		#ifdef _DBG_BOUNDS
+#endif
+		
 		if (iter == uMAX_PARENTS_PERQUERY-1)
 		{
+			#ifdef _DBG_BOUNDS
 			printf("Error: Iterations crossed the assumed limit. FPSetCoords size overrun \n");
+			#endif
 			break;
 		}
-		#endif
 	}
 	while(nextIter);
 
 	// Search Iterations Ends
 	// Re-rnking start
-
+#ifdef _TIMERS
 	gputimer.Start();
-
-	// Lets ensure we have received all the FP vectors before starting the Re-ranking. 
+#endif
+	// Lets ensure we have received all the FP vectors before starting the Re-ranking.
 	// We need FP vectors to calculate exact distances now. Compressed vectors are not used hereafter
-	cudaStreamSynchronize(streamFPTransfers);
-	
-	compute_L2Dist<<<numQueries, K4_blockSize, D * sizeof(T) >>> (d_FPSetCoordsList,
-												d_FPSetCoordsList_Counts,
+	cudaStreamSynchronize(oGPUInst.streamFPTransfers);
+
+	compute_L2Dist<<<numQueries, oGPUInst.K4_blockSize, oInputData.D * sizeof(T) >>> (d_FPSetCoordsList,
+												oGPUInst.d_FPSetCoordsList_Counts,
 												d_queriesFP,
-												d_L2ParentIds,
-												d_L2distances,
-												d_numQueries,
-												D,
-												objSearchParams.uDistFunc == ENUM_DIST_MIPS ? MIPS_EXTRA_DIM : 0);
+												oGPUInst.d_L2ParentIds,
+												oGPUInst.d_L2distances,
+												numQueries,
+												oInputData.D,
+												oSearchParams.uDistFunc == ENUM_DIST_MIPS ? MIPS_EXTRA_DIM : 0);
 
 
 	// We have the exact distances of each each candidate. Lets pick the topk neighbours.
-	compute_NearestNeighbours<<<numQueries, MAX_PARENTS_PERQUERY >>> (d_L2ParentIds,
-												d_L2ParentIds_aux,
-												d_FPSetCoordsList_Counts,
-												d_L2distances,
-												d_L2distances_aux,
-												d_nearestNeighbours,
-												d_numQueries,
-												d_recall);
+	compute_NearestNeighbours<<<numQueries, MAX_PARENTS_PERQUERY >>> (oGPUInst.d_L2ParentIds,
+												oGPUInst.d_L2ParentIds_aux,
+												oGPUInst.d_FPSetCoordsList_Counts,
+												oGPUInst.d_L2distances,
+												oGPUInst.d_L2distances_aux,
+												oGPUInst.d_nearestNeighbours,
+												numQueries,
+												oSearchParams.recall);
 
 
-
+#ifdef _TIMERS
 	gputimer.Stop();
 
 	fp_set_time_gpu += gputimer.Elapsed() ;
 
 	start = std::chrono::high_resolution_clock::now();
+#endif
+	gpuErrchk(cudaMemcpy(nearestNeighbours, oGPUInst.d_nearestNeighbours, sizeof(result_ann_t) * (oSearchParams.recall * numQueries),
+				cudaMemcpyDeviceToHost));
+	gpuErrchk(cudaMemcpy(nearestNeighbours_dist, oGPUInst.d_L2distances, sizeof(float) * (oSearchParams.recall * numQueries),
+				cudaMemcpyDeviceToHost));
 
-	gpuErrchk(cudaMemcpy(nearestNeighbours, d_nearestNeighbours, sizeof(result_ann_t) * (recall_at * numQueries),
-				cudaMemcpyDeviceToHost));
-	gpuErrchk(cudaMemcpy(nearestNeighbours_dist, d_L2distances, sizeof(float) * (recall_at * numQueries),
-				cudaMemcpyDeviceToHost));
+#ifdef _TIMERS
 	stop = std::chrono::high_resolution_clock::now();
 	time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
-
+#endif
 	// Re-rnking end
-
+#ifdef _TIMERS
 	auto milliEnd = log_message("SEARCH END");
-	
+#endif
 
-
+#ifdef _TIMERS
 	assert(time_B1_vec.size() >= 1);
 	float time_B1_avg = time_B1_vec[0];
 	time_B1 = time_B1_avg;
@@ -870,25 +885,22 @@ void bang_query(T* query_array, int num_queries,
 	cout << "(7) total transfer_time (CPU <--> GPU) = " << time_transfer / 1000 << " ms" << endl;
 	cout << "(8) total neigbbour seek time = " << seek_neighbours_time /  1000 << " ms" << endl;
 	cout << "(9) Time elapsed in L2 Dist computation (GPU)= " << fp_set_time_gpu  << " ms" << endl;
-	#ifdef _DBG_BLOOMFILTER
-	cout << "10) Bloom Filter Efficiency  = " << (myUnvisisted_bf/myUnvisisted_actual) * 100 << "%" << endl;
-	#endif
-
+	// Note : (5) not included, becasue it is shadowed by (8)
+	cout << "Total time from timers = (1) + (3) + (6) + (7) + (8) + (9) = " << totalTime << " ms" << endl;
 	double totalTime = time_K1 + time_B1 + time_neighbor_filtering + (time_transfer / 1000) + (seek_neighbours_time / 1000)    ; // in ms
 	totalTime += fp_set_time_gpu  ;
 	double totalTime_wallclock = milliEnd - milliStart;
 	double throughput = (numQueries * 1000.0) / totalTime_wallclock;
-	// Note : (5) not included, becasue it is shadowed by (8)
-	cout << "Total time = (1) + (3) + (6) + (7) + (8) + (9) = " << totalTime << " ms" << endl;
 	cout << "Wall Clock Time = " << totalTime_wallclock << endl;
 	cout << "Throughput = " << throughput << " QPS" << endl;
 	cout << "Throughput (Exclude Mem Transfers) = " << (numQueries * 1000.0) / (totalTime_wallclock - time_transfer / 1000) << " QPS" << endl;
+#endif
 
+#ifdef _DBG_CAND
 	unsigned total_size=0;
-#ifdef _DBG_BOUNDS
 	unsigned* FPSetCoordsList_Counts_temp = (unsigned*)malloc(sizeof(unsigned) * numQueries);
 
-	gpuErrchk(cudaMemcpy(FPSetCoordsList_Counts_temp, d_FPSetCoordsList_Counts, sizeof(unsigned) * numQueries, cudaMemcpyDeviceToHost ));
+	gpuErrchk(cudaMemcpy(FPSetCoordsList_Counts_temp, oGPUInst.d_FPSetCoordsList_Counts, sizeof(unsigned) * numQueries, cudaMemcpyDeviceToHost ));
 	for (int i=0; i< numQueries; i++)
 	{
 		total_size += FPSetCoordsList_Counts_temp[i];
@@ -897,58 +909,7 @@ void bang_query(T* query_array, int num_queries,
 	cout << "Total candidates " << total_size << endl;
 #endif
 
-	// reset counters
-	time_K1 = 0.0f;
-	time_B1 = 0.0f;
-	time_B2 = 0.0f;
-	time_B1_vec.clear();
-	time_B2_vec.clear();
-	time_B1_avg = 0;
-	time_B2_avg = 0;
-	time_neighbor_filtering = 0;
-	time_transfer = 0;
-	seek_neighbours_time = 0;
-	fp_set_time_gpu = 0;
-	iter = 1;
 
-	// Free all allocated memory on CPU and GPU
-	free(L2ParentIds);
-	free(FPSetCoordsList_Counts);
-	gpuErrchk(cudaFreeHost(FPSetCoordsList));
-	gpuErrchk(cudaFreeHost(neighbors));
-	gpuErrchk(cudaFreeHost(numNeighbors_query));
-	gpuErrchk(cudaFreeHost(parents));
-	gpuErrchk(cudaFree(d_FPSetCoordsList));
-	gpuErrchk(cudaFree(d_L2distances));
-	gpuErrchk(cudaFree(d_L2ParentIds));
-	gpuErrchk(cudaFree(d_L2distances_aux));
-	gpuErrchk(cudaFree(d_L2ParentIds_aux));
-	gpuErrchk(cudaFree(d_BestLSets_visited));
-	gpuErrchk(cudaFree(d_BestLSetsDist));
-	gpuErrchk(cudaFree(d_BestLSets));
-	gpuErrchk(cudaFree(d_pqDistTables));
-	gpuErrchk(cudaFree(d_processed_bit_vec));
-	gpuErrchk(cudaFree(d_nextIter));
-	gpuErrchk(cudaFree(d_iter));
-	gpuErrchk(cudaFree(d_neighbors));
-	gpuErrchk(cudaFree(d_neighbors_aux));
-	gpuErrchk(cudaFree(d_numNeighbors_query));
-	gpuErrchk(cudaFree(d_neighborsDist_query));
-	gpuErrchk(cudaFree(d_neighborsDist_query_aux));
-	gpuErrchk(cudaFree(d_parents));
-	gpuErrchk(cudaFree(d_BestLSets_count));
-	gpuErrchk(cudaFree(d_neighbors_temp));
-	gpuErrchk(cudaFree(d_numNeighbors_query_temp));
-	gpuErrchk(cudaFree(d_mark));
-	gpuErrchk(cudaFree(d_queriesFP));
-	gpuErrchk(cudaFree(d_FPSetCoordsList_Counts));
-	gpuErrchk(cudaFree(d_nearestNeighbours));
-	gpuErrchk(cudaFree(d_recall));
-	gpuErrchk(cudaFree(d_numQueries));
-	cudaStreamDestroy(streamFPTransfers);
-	cudaStreamDestroy(streamKernels);
-	cudaStreamDestroy(streamParent);
-	cudaStreamDestroy(streamChildren);
 }
 
 template void bang_query<float>(float* query_file, int num_queries,
@@ -1099,8 +1060,8 @@ __global__ void  compute_neighborDist_par(unsigned* d_neighbors,
 											float*  d_neighborsDist_query,
 											unsigned n_chunks,
 											unsigned R) {
-									
-	
+
+
 	unsigned tid = threadIdx.x;
 	unsigned queryID = blockIdx.x;
 	unsigned numNeighbors = d_numNeighbors_query[queryID];
@@ -1116,7 +1077,7 @@ __global__ void  compute_neighborDist_par(unsigned* d_neighbors,
 		d_neighborsDist_query_start[uIter] = 0;
 
 	// The threadblock size is 8*R = 8*64 = 512. Each thread will compute dist on uChunks/8 dimensions
-	#define THREADS_PER_NEIGHBOR 8			
+	#define THREADS_PER_NEIGHBOR 8
 	typedef cub::WarpReduce<float,THREADS_PER_NEIGHBOR> WarpReduce;
 	__shared__ typename WarpReduce::TempStorage temp_storage[MAX_R];
 
@@ -1151,21 +1112,21 @@ __global__ void compute_L2Dist (T* d_FPSetCoordsList,
 								T* d_queriesFP,
 								unsigned* d_L2ParentIds,
 								float* d_L2distances,
-								unsigned* d_numQueries,
+								unsigned d_numQueries,
 								unsigned long long D,
 								unsigned n_DimAdjust)
 {
 	extern __shared__ char array[];
-	
+
 	T* query_vec = (T*) array;
 	unsigned queryID = blockIdx.x;
 	unsigned numNodes = d_FPSetCoordsList_Counts[queryID];
 	unsigned tid = threadIdx.x;
 	unsigned gid =  queryID * (D - n_DimAdjust);
-	unsigned numQueries = *d_numQueries;
+
 	// ToDo : see if this can be re-used from global, instead of re-defining here
 	const unsigned long long FPSetCoords_size = D;
-	const unsigned long long FPSetCoords_rowsize = FPSetCoords_size * numQueries;
+	const unsigned long long FPSetCoords_rowsize = FPSetCoords_size * d_numQueries;
 
 	for(unsigned ii= tid; ii < D - (n_DimAdjust); ii += blockDim.x) {
 		query_vec[ii] = d_queriesFP[gid + ii];
@@ -1188,7 +1149,7 @@ __global__ void compute_L2Dist (T* d_FPSetCoordsList,
 			float diff = d_FPSetCoordsList[(FPSetCoords_rowsize * ii) + (queryID * FPSetCoords_size) + jj] - query_vec[jj];
 			L2Dist = L2Dist + (diff * diff);
 		}
-		d_L2distances[( numQueries * ii) + queryID ] = L2Dist;
+		d_L2distances[( d_numQueries * ii) + queryID ] = L2Dist;
 	}
 }
 
@@ -1209,8 +1170,8 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 						float* d_L2distances,
 						float* d_L2distances_aux,
 						result_ann_t* d_nearestNeighbours,
-						unsigned* d_numQueries,
-						unsigned* d_recall)
+						unsigned d_numQueries,
+						unsigned d_recall)
 {
     unsigned tid = threadIdx.x;
     unsigned queryID = blockIdx.x;
@@ -1218,7 +1179,7 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 
     if(tid >= numNeighbors || numNeighbors <= 0) return;
 
-    __shared__ unsigned shm_pos[MAX_PARENTS_PERQUERY + 1]; 
+    __shared__ unsigned shm_pos[MAX_PARENTS_PERQUERY + 1];
 
 	// perform parallel merge sort
 	for(unsigned subArraySize=2; subArraySize< 2*numNeighbors; subArraySize *= 2){
@@ -1228,14 +1189,14 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 		unsigned end = min(start + subArraySize, numNeighbors);
 
 		if(tid >= start && tid < mid){
-			unsigned lowerBound = lower_bound_d_ex(&d_L2distances[mid * (*d_numQueries)], 0, end-mid, d_L2distances[(tid * (*d_numQueries)) + queryID],
-								*d_numQueries, queryID);
+			unsigned lowerBound = lower_bound_d_ex(&d_L2distances[mid * (d_numQueries)], 0, end-mid, d_L2distances[(tid * (d_numQueries)) + queryID],
+								d_numQueries, queryID);
 			shm_pos[tid] = lowerBound + tid;	// Position for this element
 		}
 
 		if(tid >= mid && tid < end)  {
-			unsigned upperBound = upper_bound_d_ex(&d_L2distances[start * (*d_numQueries)], 0, mid-start, d_L2distances[(tid * (*d_numQueries)) + queryID],
-								*d_numQueries, queryID);
+			unsigned upperBound = upper_bound_d_ex(&d_L2distances[start * (d_numQueries)], 0, mid-start, d_L2distances[(tid * (d_numQueries)) + queryID],
+								d_numQueries, queryID);
 			shm_pos[tid] = start + (upperBound + tid-mid);	// Position for this element
 
 		}
@@ -1244,20 +1205,20 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 
 		// Copy the neighbors to auxiliary array at their correct position
 		for(int i=tid; i < numNeighbors; i += blockDim.x) {
-			d_L2distances_aux[(shm_pos[i]* (*d_numQueries)) + queryID] = d_L2distances[(i * (*d_numQueries)) + queryID];
-			d_L2ParentIds_aux[(shm_pos[i]* (*d_numQueries)) + queryID] = d_L2ParentIds[(i * (*d_numQueries)) + queryID];
+			d_L2distances_aux[(shm_pos[i]* (d_numQueries)) + queryID] = d_L2distances[(i * (d_numQueries)) + queryID];
+			d_L2ParentIds_aux[(shm_pos[i]* (d_numQueries)) + queryID] = d_L2ParentIds[(i * (d_numQueries)) + queryID];
 		}
 		__syncthreads();
 		// Copy the auxiliary array to original array
 		for(int i=tid; i < numNeighbors; i += blockDim.x) {
-			d_L2distances[(i * (*d_numQueries)) + queryID] = d_L2distances_aux[(i * (*d_numQueries)) + queryID];
-			d_L2ParentIds[(i * (*d_numQueries)) + queryID] = d_L2ParentIds_aux[(i * (*d_numQueries)) + queryID];
+			d_L2distances[(i * (d_numQueries)) + queryID] = d_L2distances_aux[(i * (d_numQueries)) + queryID];
+			d_L2ParentIds[(i * (d_numQueries)) + queryID] = d_L2ParentIds_aux[(i * (d_numQueries)) + queryID];
 		}
 		__syncthreads();
 	}
-	for(unsigned ii = tid; ii < *d_recall; ii += blockDim.x)
+	for(unsigned ii = tid; ii < d_recall; ii += blockDim.x)
 	{
-		d_nearestNeighbours[( (*d_recall * queryID) ) + ii ] = d_L2ParentIds[( (*d_numQueries) * ii) + queryID ];
+		d_nearestNeighbours[( (d_recall * queryID) ) + ii ] = d_L2ParentIds[( (d_numQueries) * ii) + queryID ];
 	}
 }
 
@@ -1282,14 +1243,14 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
  								unsigned* d_iter,
  								unsigned* d_L2ParentIds,
  								unsigned* d_FPSetCoordsList_Counts,
- 								unsigned* d_numQueries,
+ 								unsigned d_numQueries,
 								unsigned uWLLen,
 								unsigned long long MEDOID,
 								unsigned R)
  {
 	unsigned tid = threadIdx.x;
   	unsigned queryID = (blockIdx.x*blockDim.x) + tid;
-	if (queryID >= (*d_numQueries) )
+	if (queryID >= (d_numQueries) )
 		return;
 
   	// Single thread is enough to compute the parent (pre-fetched) for a query. So, One ThreadBlock can work
@@ -1299,7 +1260,7 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 
 	float dist=3.402823E+38;	//assigning max float value
 	unsigned index = 0;
-	unsigned numQueries = *d_numQueries;
+
 	unsigned offset = queryID*(R+1);
 
 	/*Locate closest neighbor in neighbor list*/
@@ -1325,8 +1286,8 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 				d_mark[queryID]= d_neighbors[index];
 			}
 			else{
-				d_BestLSets_visited[LIndex] = true;
 				d_parents[parentOffset + parentIndex] = d_BestLSets[LIndex];
+				d_BestLSets_visited[LIndex] = true;
 			}
 			break;
 		}
@@ -1339,9 +1300,7 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 		d_mark[queryID]= d_neighbors[index];
 	}
 
-
-	// Place the parent in d_parents array if parent is decided and set the next iteration flag to true
-	// indicates the numParents used in neighbours seeking step
+	// For every query, indicates whether a next parent if found or not
 	d_parents[parentOffset] = parentIndex;
 
 	if(parentIndex != 0) // parentIndex == 0 is the termination condition for the algorithm.
@@ -1350,13 +1309,13 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 		// Note: One thread assigned to one Query, so ok to increment (no contention)
 		d_FPSetCoordsList_Counts[queryID]++;
 		// At this point the count of parent is one ahead of the iteration number
-		d_L2ParentIds[( (*d_iter) * numQueries) + queryID] = d_parents[parentOffset + parentIndex];
+		d_L2ParentIds[( (*d_iter) * d_numQueries) + queryID] = d_parents[parentOffset + parentIndex];
 	}
  }
 
 // This is just a copy of the compute_parent2 kernel with some optimizations for the initial case i.e. when serach iterations have not started.
 // The very first time we are computing the parent and work list is not yet initialized. So, we can just pick the closet
-// neighbour from the list of neighbours directly w/o considering the worklist entries (empty). 
+// neighbour from the list of neighbours directly w/o considering the worklist entries (empty).
  __global__ void  compute_parent1(unsigned* d_neighbors, unsigned* d_numNeighbors_query, float* d_neighborsDist_query,
  								unsigned* d_BestLSets, float* d_BestLSetsDist, bool* d_BestLSets_visited,
  								unsigned* d_parents, bool* d_nextIter, unsigned* d_BestLSets_count,
@@ -1364,22 +1323,21 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
  								unsigned* d_iter,
  								unsigned* d_L2ParentIds,
  								unsigned* d_FPSetCoordsList_Counts,
- 								unsigned* d_numQueries,
+ 								unsigned d_numQueries,
 								unsigned long long MEDOID,
 								unsigned R)
  {
 	unsigned tid = threadIdx.x;
   	unsigned queryID = (blockIdx.x*blockDim.x) + tid;
-	if (queryID >= (*d_numQueries) )
+	if (queryID >= d_numQueries )
 		return;
 
   	// Single thread is enough to compute the parent (pre-fetched) for a query. So, One ThreadBlock can work
   	// on computing parents for blockDim.x Queries
 	unsigned numNeighbors = d_numNeighbors_query[queryID];
-	
+
 	float dist=3.402823E+38;	//assigning max float value
 	unsigned index = 0;
-	unsigned numQueries = *d_numQueries;
 
 	unsigned offset = queryID *(R+1);
 
@@ -1412,7 +1370,7 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 		*d_nextIter = true;
 		// Note: One thread assigned to one Query, so ok to increment (no contention)
 		d_FPSetCoordsList_Counts[queryID]++;
-		d_L2ParentIds[( (*d_iter) * numQueries) + queryID] = d_parents[queryID*(SIZEPARENTLIST)+parentIndex];
+		d_L2ParentIds[( (*d_iter) * d_numQueries) + queryID] = d_parents[queryID*(SIZEPARENTLIST)+parentIndex];
 	}
 
 }
@@ -1497,7 +1455,7 @@ __global__ void  compute_BestLSets_par_sort_msort(unsigned* d_neighbors,
  * @param uWLLen Worklist Length
  * @param MEDOID Medoid of the Graph.
  * @param R Graph degree.
- * 
+ *
  */
 __global__ void  compute_BestLSets_par_merge(unsigned* d_neighbors,
 											unsigned* d_numNeighbors_query,
@@ -1515,11 +1473,11 @@ __global__ void  compute_BestLSets_par_merge(unsigned* d_neighbors,
 											unsigned R){
 	extern __shared__ char array[];
 	float *shm_neighborsDist_query = (float*) array; // R+1 is an upperbound on the number of neighbors
-	__shared__ float shm_currBestLSetsDist[L];
-	__shared__ float shm_BestLSetsDist[L];
-	__shared__ unsigned shm_pos[MAX_R+L+1];
-	__shared__ unsigned shm_BestLSets[L];
-	__shared__ bool shm_BestLSets_visited[L];
+	__shared__ float shm_currBestLSetsDist[MAX_L];
+	__shared__ float shm_BestLSetsDist[MAX_L];
+	__shared__ unsigned shm_pos[MAX_R+MAX_L+1];
+	__shared__ unsigned shm_BestLSets[MAX_L];
+	__shared__ bool shm_BestLSets_visited[MAX_L];
 
 	unsigned queryID = blockIdx.x;
 	unsigned numNeighbors = d_numNeighbors_query[queryID];

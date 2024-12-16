@@ -17,6 +17,9 @@ limitations under the License.
 
 #include <cstdint>
 
+#define MAX_L 512 // L_search Upper bound
+
+
 typedef unsigned long result_ann_t ; // big-ann-benchmarks requires the final ANNs to be returned as int64_t
 
 // Type of Similarity distnace measure
@@ -50,6 +53,15 @@ void bang_set_searchparams(int recall,
                             DistFunc nDistFunc=ENUM_DIST_L2);
 
 extern "C"  void bang_set_searchparams_c(int recall, int worklist_length, DistFunc nDistFunc=ENUM_DIST_L2);
+
+template<typename T>
+void bang_alloc(int numQueries);
+
+template<typename T>
+void bang_init(int numQueries);
+
+void bang_free();
+
 
 /*! @brief Runs search queries on the laoded index..
 *
