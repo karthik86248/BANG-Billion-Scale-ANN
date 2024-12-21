@@ -63,7 +63,8 @@ const unsigned BF_MEMORY = (BF_ENTRIES & 0xFFFFFFFC) + sizeof(unsigned); // 4-by
 
 //#define _TIMERS
 //#define _DBG_CAND
-#define _NO_PRETECH
+//#define _NO_PRETECH
+#define _NO_ASYNC_FP
 
 using namespace std;
 using Clock = std::chrono::high_resolution_clock;
@@ -633,7 +634,9 @@ void bang_query(T* queriesFP, int numQueries,
 		 * The kernel  sorts an array of size (R+1) per query, so we require (R+1) threads per query.
 		 */
 #ifdef _NO_PRETECH	
-		if (iter == 1) {
+		if (iter == 1) 
+#endif		
+		{
 		compute_BestLSets_par_sort_msort<<<numQueries, oGPUInst.numThreads_K3,0, oGPUInst.streamKernels >>>(oGPUInst.d_neighbors,
 															oGPUInst.d_neighbors_aux,
 															oGPUInst.d_numNeighbors_query,
@@ -661,8 +664,8 @@ void bang_query(T* queriesFP, int numQueries,
 										oInputData.MEDOID,
 										oInputData.R);
 		}
-#endif
-		
+
+
 #ifdef _TIMERS
 		gputimer.Stop();
 
@@ -752,6 +755,10 @@ void bang_query(T* queriesFP, int numQueries,
 		cudaMemcpyAsync(d_FPSetCoordsList + (iter * oHostInst.FPSetCoords_rowsize),
 					FPSetCoordsList + (iter * oHostInst.FPSetCoords_rowsize),
 					oHostInst.FPSetCoords_rowsize_bytes, cudaMemcpyHostToDevice, oGPUInst.streamFPTransfers);
+
+#ifdef _NO_ASYNC_FP
+		cudaStreamSynchronize(oGPUInst.streamFPTransfers);	
+#endif
 
 		gpuErrchk(cudaMemsetAsync(oGPUInst.d_numNeighbors_query, 0, sizeof(unsigned)*numQueries, oGPUInst.streamChildren));
 		cudaStreamSynchronize(oGPUInst.streamChildren);
