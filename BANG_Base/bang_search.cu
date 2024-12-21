@@ -46,6 +46,7 @@ limitations under the License.
 
 // The size of Bloom Filter.
 #define BF_ENTRIES  399887U    	 // BF is maintained per query (prime number close to 4k)
+						// use 10007, 4999, 3001, 1999, 1501, 999, 299  for lower recalls
 const unsigned BF_MEMORY = (BF_ENTRIES & 0xFFFFFFFC) + sizeof(unsigned); // 4-byte mem aligned size for actual allocation
 
 // Indicates static upper bound on search iterations performed
@@ -56,9 +57,12 @@ const unsigned BF_MEMORY = (BF_ENTRIES & 0xFFFFFFFC) + sizeof(unsigned); // 4-by
 // In future, we could use multiple Parents.
 #define SIZEPARENTLIST  (1+1) // one to indicate present/absent and other the actual parent ID
 
-//#define _DBG_CAND
+
 
 //#define _DBG_BOUNDS
+
+//#define _TIMERS
+//#define _DBG_CAND
 
 using namespace std;
 using Clock = std::chrono::high_resolution_clock;
@@ -86,20 +90,20 @@ void bang_load(char* indexfile_path_prefix)
 		printf("Error.. Could not open the PQ Pivots File: %s", pqTable_file.c_str() );
 		return;
 	}
-	
+
 	ifstream in2(compressedVector_file, std::ios::binary);
 	if(!in2.is_open()){
 		printf("Error.. Could not open the PQ Compressed Vectors File: %s", compressedVector_file.c_str() );
 		return;
 	}
-	
+
 
 	ifstream in3(graphAdjListAndFP_file, std::ios::binary);
 	if(!in3.is_open()){
 		printf("Error.. Could not open the Graph Index File: %s", graphAdjListAndFP_file.c_str());
 		return;
 	}
-	
+
 	// Reading the Graph Metadata File
 	GraphMedataData objGrapMetaData;
 	ifstream in5(graphMetadata_file, std::ios::binary);
@@ -245,6 +249,7 @@ void bang_load(char* indexfile_path_prefix)
 
 template void bang_load<float>(char* );
 template void bang_load<uint8_t>(char* );
+template void bang_load<int8_t>(char* );
 // ToDo: Add definitions for other dataset types e.g. int8_t for MSSPACEV dataset after testing
 
 void bang_load_c(char* pszPath)
@@ -263,7 +268,7 @@ void bang_alloc(int numQueries)
 	oHostInst.FPSetCoords_rowsize = oHostInst.FPSetCoords_size * numQueries;
 	oHostInst.FPSetCoords_rowsize_bytes = oHostInst.FPSetCoords_size_bytes * numQueries;
 
-	
+
 	// Allocations on GPU
 	gpuErrchk(cudaMalloc(&oGPUInst.d_queriesFP, sizeof(T) * (numQueries*oInputData.D)));
 	gpuErrchk(cudaMalloc(&oGPUInst.d_nearestNeighbours, (oSearchParams.recall * numQueries) * sizeof(result_ann_t) ));// Dim: [recall_at * numQueries]
@@ -313,6 +318,7 @@ void bang_alloc(int numQueries)
 }
 template void bang_alloc<float>(int  );
 template void bang_alloc<uint8_t>(int  );
+template void bang_alloc<int8_t>(int  );
 
 
 // Note:To be called after setSearchparams
@@ -401,6 +407,7 @@ void bang_init(int numQueries)
 }
 template void bang_init<float>(int  );
 template void bang_init<uint8_t>(int  );
+template void bang_init<int8_t>(int  );
 
 
 void bang_free()
@@ -486,7 +493,7 @@ void bang_query(T* queriesFP, int numQueries,
 	double time_B1 = 0.0f;
 	double time_B2 = 0.0f;
 	double time_neighbor_filtering = 0.0f;
-
+	double time_prfetch	= 0.0f;
 	// CPU execution times
 	double fp_set_time_gpu = 0.0f; // GPU side
 	double seek_neighbours_time = 0.0f;
@@ -500,7 +507,7 @@ void bang_query(T* queriesFP, int numQueries,
 	//unsigned uMaxNeighbors =  (oInputData.R+1);
 
 #ifdef _TIMERS
-	GPUTimer gputimer (streamKernels, true);	// Initiating the GPUTimer class object
+	GPUTimer gputimer (oGPUInst.streamKernels, false);	// Initiating the GPUTimer class object
 #endif
 
 	const unsigned uMAX_PARENTS_PERQUERY = (oSearchParams.worklist_length + NAX_EXTRA_ITERATION) ; //Needs to be set with expereince. set it to (2*L) if in doubt
@@ -535,14 +542,22 @@ void bang_query(T* queriesFP, int numQueries,
 #ifdef _TIMERS
 	gputimer.Stop();
 	time_K1 += gputimer.Elapsed();
-
-	gputimer.Start();
+	start = std::chrono::high_resolution_clock::now();
 #endif
 
 	gpuErrchk(cudaMemset(oGPUInst.d_numNeighbors_query, 0, sizeof(unsigned)*numQueries));
+
+#ifdef _TIMERS
+	stop = std::chrono::high_resolution_clock::now();
+	time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
+#endif
+
 	/** [4] Launching the kernel with "numQueries" number of thread-blocks and block size of 256
 	 * One thread block is assigned to a query, i.e., 256 threads perform the computation for a query. The block size has been tuned for performance.
 	 */
+#ifdef _TIMERS
+	gputimer.Start();
+#endif
 	neighbor_filtering_new<<<numQueries, oGPUInst.numThreads_K5, 0, oGPUInst.streamKernels >>> (oGPUInst.d_neighbors, oGPUInst.d_neighbors_temp, oGPUInst.d_numNeighbors_query,
 				oGPUInst.d_numNeighbors_query_temp, oGPUInst.d_processed_bit_vec,oInputData.R);
 
@@ -558,8 +573,14 @@ void bang_query(T* queriesFP, int numQueries,
 	 */
 	compute_neighborDist_par <<<numQueries, oGPUInst.numThreads_K2,0, oGPUInst.streamKernels >>> (oGPUInst.d_neighbors, oGPUInst.d_numNeighbors_query, oInputData.d_compressedVectors,
 	oGPUInst.d_pqDistTables, oGPUInst.d_neighborsDist_query, oInputData.uChunks, oInputData.R);
-	gpuErrchk(cudaMemcpy(oGPUInst.d_iter, &iter, sizeof(unsigned), cudaMemcpyHostToDevice));
 
+	gpuErrchk(cudaMemcpyAsync(oGPUInst.d_iter, &iter, sizeof(unsigned), cudaMemcpyHostToDevice, oGPUInst.streamKernels));
+
+#ifdef _TIMERS
+	gputimer.Stop();
+	time_B1_vec.push_back(gputimer.Elapsed());
+	gputimer.Start();
+#endif
 	/** [6] Launching the kernel with "X" number of thread-blocks and block size of one. X is calculated below
 	 * A single threads perform the computation for a query.
 	 * Note: The  additional arithmetic in the number of thread blocks it to arrive a ceil value. After assigning a required value
@@ -584,16 +605,18 @@ void bang_query(T* queriesFP, int numQueries,
 						oInputData.R);
 #ifdef _TIMERS
 	gputimer.Stop();
-	time_B1_vec.push_back(gputimer.Elapsed());
+	time_prfetch += gputimer.Elapsed();
 #endif
 	// Loop until all the query have no new parents/candidates
 	do
 	{
-		// Let's wait for all kernels got a chance to execute before we initiate  transfer of the 'd_parents'
-		cudaStreamSynchronize(oGPUInst.streamKernels);
+
 #ifdef _TIMERS
 		start = std::chrono::high_resolution_clock::now();
-#endif
+#endif		
+		// Let's wait for all kernels got a chance to execute before we initiate  transfer of the 'd_parents'
+		cudaStreamSynchronize(oGPUInst.streamKernels);
+
 		// Transfer parent IDs from GPU to CPU
 		gpuErrchk(cudaMemcpyAsync(oHostInst.parents, oGPUInst.d_parents, sizeof(unsigned) * ((SIZEPARENTLIST)*numQueries),
 									cudaMemcpyDeviceToHost,
@@ -648,7 +671,7 @@ void bang_query(T* queriesFP, int numQueries,
 		stop = std::chrono::high_resolution_clock::now();
 		time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
 		start = std::chrono::high_resolution_clock::now();
-#endif		
+#endif
 		unsigned offset =  (oInputData.R+1); // max no of neigbours for a given parent. ToDo : can it be R here? as Medoid is not in picture
 		#pragma omp parallel
 		{
@@ -754,6 +777,11 @@ void bang_query(T* queriesFP, int numQueries,
 		compute_neighborDist_par <<<numQueries, oGPUInst.numThreads_K2,0,oGPUInst.streamKernels >>> (oGPUInst.d_neighbors, oGPUInst.d_numNeighbors_query, oInputData.d_compressedVectors,
 		oGPUInst.d_pqDistTables, oGPUInst.d_neighborsDist_query, oInputData.uChunks, oInputData.R);
 
+#ifdef _TIMERS
+		gputimer.Stop();
+		time_B1_vec.push_back(gputimer.Elapsed());
+		gputimer.Start();
+#endif
 		++iter;
 
 		gpuErrchk(cudaMemcpyAsync(oGPUInst.d_iter, &iter, sizeof(unsigned), cudaMemcpyHostToDevice, oGPUInst.streamKernels));
@@ -784,7 +812,7 @@ void bang_query(T* queriesFP, int numQueries,
 
 #ifdef _TIMERS
 		gputimer.Stop();
-		time_B1_vec.push_back(gputimer.Elapsed());
+		time_prfetch += gputimer.Elapsed();
 		start = std::chrono::high_resolution_clock::now();
 #endif
 		gpuErrchk(cudaMemcpyAsync(&nextIter, oGPUInst.d_nextIter, sizeof(bool), cudaMemcpyDeviceToHost, oGPUInst.streamKernels));  //d_nextIter calculated in compute_parent<<< >>>
@@ -795,7 +823,7 @@ void bang_query(T* queriesFP, int numQueries,
 		stop = std::chrono::high_resolution_clock::now();
 		time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
 #endif
-		
+
 		if (iter == uMAX_PARENTS_PERQUERY-1)
 		{
 			#ifdef _DBG_BOUNDS
@@ -876,19 +904,23 @@ void bang_query(T* queriesFP, int numQueries,
 
 	cout << "STATS:" << endl;
 	cout << "Total Search iterations = " <<  iter << endl;
-	cout << "(1) total time_K1 = " << time_K1 << " ms" << endl;
-	cout << "(2) avg. time_B1 = " << time_B1_avg << " ms" << endl;
-	cout << "(3) total time_B1 = " << time_B1 << " ms" << endl;;
-	cout << "(4) avg. time_B2 = " << time_B2_avg << " ms" << endl;
-	cout << "(5) total time_B2 = " << time_B2 << " ms" << endl;
-	cout << "(6) total neighbor_filtering_time = " << time_neighbor_filtering  << " ms" << endl;
+	cout << "(1) PD Dist Table Construction = " << time_K1 << " ms" << endl;
+	//cout << "(2) avg. time_B1 = " << time_B1_avg << " ms" << endl;
+	cout << "(2) Distance Computations = " << time_B1 << " ms" << endl;;
+	//cout << "(4) avg. time_B2 = " << time_B2_avg << " ms" << endl;
+	cout << "(3) Sort and Merge = " << time_B2 << " ms" << endl;
+	cout << "(4) total neighbor_filtering_time = " << time_neighbor_filtering  << " ms" << endl;
+	cout << "(5) Pre-fetch time = " << time_prfetch  << " ms" << endl;
+	cout << "(6) Time elapsed in L2 Dist computation (GPU)= " << fp_set_time_gpu  << " ms" << endl;
+
 	cout << "(7) total transfer_time (CPU <--> GPU) = " << time_transfer / 1000 << " ms" << endl;
 	cout << "(8) total neigbbour seek time = " << seek_neighbours_time /  1000 << " ms" << endl;
-	cout << "(9) Time elapsed in L2 Dist computation (GPU)= " << fp_set_time_gpu  << " ms" << endl;
+
 	// Note : (5) not included, becasue it is shadowed by (8)
-	cout << "Total time from timers = (1) + (3) + (6) + (7) + (8) + (9) = " << totalTime << " ms" << endl;
-	double totalTime = time_K1 + time_B1 + time_neighbor_filtering + (time_transfer / 1000) + (seek_neighbours_time / 1000)    ; // in ms
-	totalTime += fp_set_time_gpu  ;
+	double totalTime = time_K1 + time_B1 + time_neighbor_filtering + (time_transfer / 1000) +
+					(seek_neighbours_time / 1000)  + time_prfetch  + fp_set_time_gpu; // in ms
+	cout << "Total time from timers = (1) + (2) + (4) + (5) + (6) + (8) = " << totalTime << " ms" << endl;
+
 	double totalTime_wallclock = milliEnd - milliStart;
 	double throughput = (numQueries * 1000.0) / totalTime_wallclock;
 	cout << "Wall Clock Time = " << totalTime_wallclock << endl;
@@ -915,6 +947,8 @@ void bang_query(T* queriesFP, int numQueries,
 template void bang_query<float>(float* query_file, int num_queries,
 						result_ann_t* nearestNeighbours, float* nearestNeighbours_dist ) ;
 template void bang_query<uint8_t>(uint8_t* query_file, int num_queries,
+						result_ann_t* nearestNeighbours, float* nearestNeighbours_dist ) ;
+template void bang_query<int8_t>(int8_t* query_file, int num_queries,
 						result_ann_t* nearestNeighbours, float* nearestNeighbours_dist ) ;
 
 void bang_query_c(uint8_t* query_array, int num_queries,

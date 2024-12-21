@@ -399,7 +399,7 @@ int run_anns(int argc, char **argv)
 			{
                 if (nIter == 0)
                 {
-                    cout << "L\t" << "Time \t" << "QPS\t" << "\tRecall" << endl;
+                    cout << "L\t" << "Time \t" << "QPS\t" << "\t" << recall_param <<"-r@" << recall_param << endl;
                     cout << "=\t" << "==== \t" << "===\t" << "\t===" << endl;
                 }
                 else
@@ -573,7 +573,7 @@ int main(int argc, char **argv)
 	}
 	else if (DT_INT8 == argv[6])
 	{
-		// return run_anns<int8_t>(argc, argv);
+		 return run_anns<int8_t>(argc, argv);
 	}
 	else if (DT_FLOAT == argv[6])
 	{
