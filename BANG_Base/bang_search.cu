@@ -63,6 +63,7 @@ const unsigned BF_MEMORY = (BF_ENTRIES & 0xFFFFFFFC) + sizeof(unsigned); // 4-by
 
 //#define _TIMERS
 //#define _DBG_CAND
+#define _NO_PRETECH
 
 using namespace std;
 using Clock = std::chrono::high_resolution_clock;
@@ -631,6 +632,8 @@ void bang_query(T* queriesFP, int numQueries,
 		 * One thread block is assigned to a query, i.e., (R+1) threads perform the computation for a query.
 		 * The kernel  sorts an array of size (R+1) per query, so we require (R+1) threads per query.
 		 */
+#ifdef _NO_PRETECH	
+		if (iter == 1) {
 		compute_BestLSets_par_sort_msort<<<numQueries, oGPUInst.numThreads_K3,0, oGPUInst.streamKernels >>>(oGPUInst.d_neighbors,
 															oGPUInst.d_neighbors_aux,
 															oGPUInst.d_numNeighbors_query,
@@ -657,6 +660,9 @@ void bang_query(T* queriesFP, int numQueries,
 										oSearchParams.worklist_length,
 										oInputData.MEDOID,
 										oInputData.R);
+		}
+#endif
+		
 #ifdef _TIMERS
 		gputimer.Stop();
 
@@ -786,6 +792,36 @@ void bang_query(T* queriesFP, int numQueries,
 
 		gpuErrchk(cudaMemcpyAsync(oGPUInst.d_iter, &iter, sizeof(unsigned), cudaMemcpyHostToDevice, oGPUInst.streamKernels));
 
+#ifdef _NO_PRETECH
+// No prefetch start
+		compute_BestLSets_par_sort_msort<<<numQueries, oGPUInst.numThreads_K3,0, oGPUInst.streamKernels >>>(oGPUInst.d_neighbors,
+															oGPUInst.d_neighbors_aux,
+															oGPUInst.d_numNeighbors_query,
+															oGPUInst.d_neighborsDist_query,
+															oGPUInst.d_neighborsDist_query_aux,
+															oGPUInst.d_nextIter, oInputData.R);
+
+		/** [9] Launching the kernel with "numQueries" number of thread-blocks and (2*L) block size.
+		 * One thread block is assigned to a query, i.e., (2*L) threads perform the computation for a query.
+		 * The kernel merges, for every query, two arrays each of whose sizes are upperbounded by L,
+		 * so we require 2*L threads per query.
+		 */
+		compute_BestLSets_par_merge<<<numQueries, oGPUInst.numThreads_K3_merge, (oInputData.R+1)*sizeof(float), oGPUInst.streamKernels >>>(oGPUInst.d_neighbors,
+										oGPUInst.d_numNeighbors_query,
+										oGPUInst.d_neighborsDist_query,
+										oGPUInst.d_BestLSets,
+										oGPUInst.d_BestLSetsDist,
+										oGPUInst.d_BestLSets_visited,
+										oGPUInst.d_parents,
+										iter,
+										oGPUInst.d_nextIter,
+										oGPUInst.d_BestLSets_count,
+										oGPUInst.d_mark,
+										oSearchParams.worklist_length,
+										oInputData.MEDOID,
+										oInputData.R);
+// No prefetch end
+#endif
 		/** [13] Launching the kernel with "X" number of thread-blocks and block size of one.
 	 	* A songle threads perform the computation for a query.
 		 */
