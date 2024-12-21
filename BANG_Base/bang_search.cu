@@ -57,14 +57,12 @@ const unsigned BF_MEMORY = (BF_ENTRIES & 0xFFFFFFFC) + sizeof(unsigned); // 4-by
 // In future, we could use multiple Parents.
 #define SIZEPARENTLIST  (1+1) // one to indicate present/absent and other the actual parent ID
 
-
-
-//#define _DBG_BOUNDS
-
 //#define _TIMERS
 //#define _DBG_CAND
 //#define _NO_PRETECH
-#define _NO_ASYNC_FP
+//#define _NO_ASYNC_FP
+
+//#define _DBG_BOUNDS
 
 using namespace std;
 using Clock = std::chrono::high_resolution_clock;
@@ -126,10 +124,43 @@ void bang_load(char* indexfile_path_prefix)
 	oInputData.ullIndex_Entry_LEN = objGrapMetaData.ulluIndexEntryLen;
 
 
+	// Loading PQTable (binary)
+	float *pqTable = (float*) malloc(sizeof(float) * (256 * oInputData.D)); // Contains pivot coordinates
+	if (NULL == pqTable)
+	{
+		printf("Error.. Malloc failed PQ Table\n");
+		return;
+	}
+	in1.seekg(8);
+	in1.read((char*)pqTable,sizeof(float)*256*oInputData.D);
+	in1.close();
+	cout << "Finished reading :" << pqTable_file << endl;
+	// transpose pqTable
+	float *pqTable_T = (float*) malloc(sizeof(float) * (256 * oInputData.D));
+	for(unsigned row = 0; row < 256; ++row) {
+		for(unsigned col = 0; col < oInputData.D; ++col) {
+			pqTable_T[col* 256 + row] = pqTable[row*oInputData.D+col];
+		}
+	}
+
+	// Loading chunk offsets
+	unsigned *chunksOffset = NULL; //(unsigned*) malloc(sizeof(unsigned) * (oInputData.n_chunks+1));
+	uint64_t numr = oInputData.uChunks + 1;
+	uint64_t numc = 1;
+	load_bin<uint32_t>(chunkOffsets_file, chunksOffset, numr, numc);	//Import the chunkoffset file
+	//cout << "Loaded:" <<  chunkOffsets_file << endl;
+
+	// Loading centroid coordinates
+	numr = oInputData.uChunks;
+	float* centroid = NULL; // (unsigned*) malloc(sizeof(float) * (oInputData.n_chunks));;
+	load_bin<float>(centroid_file, centroid, numr, numc);				//Import centroid from centroid file
+	//cout << "Loaded:" <<  centroid_file << endl;
+
+	
 	// Loading PQ Compressed Vector (binary)
 	unsigned int N = 0;
 	in2.read((char*)&N, sizeof(int));
-	cout << "Loaded:" <<  compressedVector_file<< endl;
+	cout << "Reading:" <<  compressedVector_file<< endl;
 	cout << "No of points in Dataset = " << N	 << endl;
 
 	unsigned int uChunks = 0;
@@ -148,7 +179,7 @@ void bang_load(char* indexfile_path_prefix)
 
 	in2.read((char*)compressedVectors, sizeof(uint8_t)*N*uChunks);
 	in2.close();
-
+	cout << "Finished reading bin file." << endl;
 	// To reduce Peak Host memory usage, loading compressed vectors to CPU and transferring to GPU and releasing host memory
 	printf("Transferring Compressed Vectors to GPU ...\n");
 	gpuErrchk(cudaMalloc(&oInputData.d_compressedVectors, sizeof(uint8_t) * N * uChunks)); 	//100M*100 ~10GB
@@ -157,6 +188,16 @@ void bang_load(char* indexfile_path_prefix)
 
 	free(compressedVectors);
 	compressedVectors = NULL;
+
+	gpuErrchk(cudaMalloc(&oInputData.d_pqTable, sizeof(float) * (256*oInputData.D)));
+	gpuErrchk(cudaMalloc(&oInputData.d_chunksOffset, sizeof(unsigned) * (oInputData.uChunks+1)));
+	gpuErrchk(cudaMalloc(&oInputData.d_centroid, sizeof(float) * (oInputData.D)));
+
+	// host to device transfer
+	gpuErrchk(cudaMemcpy(oInputData.d_pqTable, pqTable_T, sizeof(float) * (256*oInputData.D), cudaMemcpyHostToDevice));
+	gpuErrchk(cudaMemcpy(oInputData.d_chunksOffset, chunksOffset, sizeof(unsigned) * (oInputData.uChunks+1), cudaMemcpyHostToDevice));
+	gpuErrchk(cudaMemcpy(oInputData.d_centroid, centroid, sizeof(float) * (oInputData.D), cudaMemcpyHostToDevice));
+
 
 
 	// Load the Vamana(DiskANN) Graph Index
@@ -198,46 +239,7 @@ void bang_load(char* indexfile_path_prefix)
 	cout << "Graph Medoid is : " << oInputData.MEDOID << "\t"  << endl;
 	cout << "BF Size : " << BF_ENTRIES << "\t"  << endl;
 
-	// Loading PQTable (binary)
-	float *pqTable = (float*) malloc(sizeof(float) * (256 * oInputData.D)); // Contains pivot coordinates
-	if (NULL == pqTable)
-	{
-		printf("Error.. Malloc failed PQ Table\n");
-		return;
-	}
 
-	in1.seekg(8);
-	in1.read((char*)pqTable,sizeof(float)*256*oInputData.D);
-	in1.close();
-	cout << "Loaded:" << pqTable_file << endl;
-	// transpose pqTable
-	float *pqTable_T = (float*) malloc(sizeof(float) * (256 * oInputData.D));
-	for(unsigned row = 0; row < 256; ++row) {
-		for(unsigned col = 0; col < oInputData.D; ++col) {
-			pqTable_T[col* 256 + row] = pqTable[row*oInputData.D+col];
-		}
-	}
-
-	// Loading chunk offsets
-	unsigned *chunksOffset = NULL; //(unsigned*) malloc(sizeof(unsigned) * (oInputData.n_chunks+1));
-	uint64_t numr = oInputData.uChunks + 1;
-	uint64_t numc = 1;
-	load_bin<uint32_t>(chunkOffsets_file, chunksOffset, numr, numc);	//Import the chunkoffset file
-	cout << "Loaded:" <<  chunkOffsets_file << endl;
-	// Loading centroid coordinates
-	numr = oInputData.uChunks;
-	float* centroid = NULL; // (unsigned*) malloc(sizeof(float) * (oInputData.n_chunks));;
-	load_bin<float>(centroid_file, centroid, numr, numc);				//Import centroid from centroid file
-	cout << "Loaded:" <<  centroid_file << endl;
-
-	gpuErrchk(cudaMalloc(&oInputData.d_pqTable, sizeof(float) * (256*oInputData.D)));
-	gpuErrchk(cudaMalloc(&oInputData.d_chunksOffset, sizeof(unsigned) * (oInputData.uChunks+1)));
-	gpuErrchk(cudaMalloc(&oInputData.d_centroid, sizeof(float) * (oInputData.D)));
-
-	// host to device transfer
-	gpuErrchk(cudaMemcpy(oInputData.d_pqTable, pqTable_T, sizeof(float) * (256*oInputData.D), cudaMemcpyHostToDevice));
-	gpuErrchk(cudaMemcpy(oInputData.d_chunksOffset, chunksOffset, sizeof(unsigned) * (oInputData.uChunks+1), cudaMemcpyHostToDevice));
-	gpuErrchk(cudaMemcpy(oInputData.d_centroid, centroid, sizeof(float) * (oInputData.D), cudaMemcpyHostToDevice));
 
 	free(pqTable);
 	pqTable = NULL;
@@ -333,10 +335,9 @@ void bang_init(int numQueries)
 	oGPUInst.numThreads_K4 = 1; //	compute_parent kernel
 	oGPUInst.numThreads_K1 = 256;//	populate_pqDist_par
 	oGPUInst.numThreads_K2 = 512;// compute_neighborDist_par
-//	oGPUInst.numThreads_K3_merge = 2*L;
 	oGPUInst.numThreads_K3 = oInputData.R+1;
 	oGPUInst.K4_blockSize = 256;
-	oGPUInst.numThreads_K5 = 256;// neighbor_filtering_new
+	oGPUInst.numThreads_K5 =256;// neighbor_filtering_new
 	oGPUInst.numThreads_K3_merge = 2*oSearchParams.worklist_length;
 	assert(oGPUInst.numThreads_K3_merge <= 1024);	// Max thread block size
 	gpuErrchk(cudaMemset(oGPUInst.d_iter,0,sizeof(unsigned)));
@@ -520,7 +521,7 @@ void bang_query(T* queriesFP, int numQueries,
 	auto milliStart = log_message("SEARCH STARTED");
 	auto start = std::chrono::high_resolution_clock::now();
 	#endif
-
+	// ToDo: Check the Dim of queriesFP == oInputData.D, for mips, Dimentionality of queriesFP +1 = oInputData.D
 	gpuErrchk(cudaMemcpy(d_queriesFP, queriesFP, sizeof(T) * (oInputData.D*numQueries), cudaMemcpyHostToDevice));
 
 #ifdef _TIMERS

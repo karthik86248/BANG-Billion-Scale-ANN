@@ -389,6 +389,12 @@ int run_anns(int argc, char **argv)
 			{
 			cout << "Enter value of WorkList Length" << endl;
 			cin >> nWLLen;
+			if (nWLLen < recall_param )
+			{
+				cout << " Error: WorkList Length must be at least recall_at" << endl;
+				continue;
+			}
+
 //            if (nIter == 0)
             {
                 cout << "L\t" << "Time \t" << "QPS\t" << "\t" << recall_param <<"-r@" << recall_param << endl;
@@ -527,7 +533,7 @@ int run_anns(int argc, char **argv)
                 char c = 'n';
                 cout << "Try Next run ? [y|n]" << endl;
                 cin >> c;
-                if (c != 'y')
+                if (c == 'n')
                     break;
             }
             nIter++;
