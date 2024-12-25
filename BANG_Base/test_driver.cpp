@@ -516,7 +516,8 @@ int run_anns(int argc, char **argv)
 					}
 
 					if (calc_recall_flag)
-						recall = calculate_recall(numQueries, gt_ids, gt_dists, gt_dim, query_result_ids[test_id].data(), recall_param, recall_param);
+						recall = calculate_recall(numQueries, gt_ids, gt_dists, gt_dim, 
+						query_result_ids[test_id].data(), recall_param, recall_param);
 					//cout << "Ls\t" << recall_string << endl;
 					//cout << L1 << "\t" << recall << endl;
 				}
@@ -526,6 +527,8 @@ int run_anns(int argc, char **argv)
 				nearestNeighbours = NULL;
 				free(nearestNeighbours_dist);
 				nearestNeighbours_dist = NULL;
+				delete[] gt_dim;
+				delete[] gt_dists; 
 			}
 			bang_free();
 			if (MODE_INTERACTIVE == strMode)
