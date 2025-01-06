@@ -6,14 +6,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Project name
-project(Bang)
+project(bang)
 
 # Enable CUDA support (required if CUDA is present)
 find_package(CUDA REQUIRED)
-
-set(Boost_USE_STATIC_LIBS ON)
-find_package(Boost COMPONENTS program_options)
-include_directories(${Boost_INCLUDE_DIR})
 
 include(cmake/thirdparty/fetch_rapids.cmake)
 include(rapids-cmake)
@@ -37,12 +33,10 @@ include_directories(
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -fopenmp")
 
 # Set options for nvcc
-set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -Xcompiler -fopenmp -std=c++17 --compiler-options '-fPIC' -O3")
+set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -Xcompiler -fopenmp")
 
 # Define the shared library target (bang)
 cuda_add_library(bang SHARED parANN.cu)
-
-# target_compile_features(bang INTERFACE cxx_std_17 $<BUILD_INTERFACE:cuda_std_17>)
 
 # Ensure position-independent code and separable compilation
 set_target_properties(bang PROPERTIES

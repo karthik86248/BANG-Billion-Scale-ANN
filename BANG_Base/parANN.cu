@@ -11,6 +11,15 @@ limitations under the License.
 ==============================================================================*/
 // Authors: Karthik V., Saim Khan, Somesh Singh
 //
+
+#include <raft/core/device_mdarray.hpp>
+#include <raft/core/device_mdspan.hpp>
+#include <raft/core/device_resources.hpp>
+#include <raft/core/host_mdarray.hpp>
+#include <raft/core/host_mdspan.hpp>
+#include <raft/core/pinned_mdarray.hpp>
+#include <raft/core/resource/cuda_stream_pool.hpp>
+
 #include <unistd.h>
 #include <iostream>
 #include <cstdio>
@@ -20,9 +29,8 @@ limitations under the License.
 #include <algorithm>
 #include <unordered_set>
 #include <assert.h>
-#include <boost/dynamic_bitset.hpp>
 #include <omp.h>
-#include <cuda_runtime.h>
+// #include <cuda_runtime.h>
 #include <cub/cub.cuh>
 #include "parANN.h"
 #include "utils/utils.h"
@@ -32,14 +40,6 @@ limitations under the License.
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-
-#include <raft/core/device_mdarray.hpp>
-#include <raft/core/device_mdspan.hpp>
-#include <raft/core/device_resources.hpp>
-#include <raft/core/host_mdarray.hpp>
-#include <raft/core/host_mdspan.hpp>
-#include <raft/core/pinned_mdarray.hpp>
-#include <raft/core/resource/cuda_stream_pool.hpp>
 
 #define MAX_R 64 // Max. node degree supported
 
@@ -177,7 +177,7 @@ void bang_load(raft::device_resources handle, char* indexfile_path_prefix)
 
 	// To reduce Peak Host memory usage, loading compressed vectors to CPU and transferring to GPU and releasing host memory
 	auto d_compressedVectors = raft::make_device_matrix<uint8_t, uint32_t>(handle, N, uChunks); 	//100M*100 ~10GB
-	raft::copy(d_compressedVectors.data_handle(), compressedVectors, (uint32_t long long)(uChunks)*N, handle.get_stream());
+	raft::copy(d_compressedVectors.data_handle(), compressedVectors, (uint32_t long long)(uChunks)*N, streamKernels);
 	objIndexLoad.d_compressedVectors = d_compressedVectors.data_handle();
 	free(compressedVectors);
 	compressedVectors = NULL;
@@ -240,7 +240,7 @@ void bang_load(raft::device_resources handle, char* indexfile_path_prefix)
 	auto d_pqTable = raft::make_device_matrix<float>(handle, (uint32_t)CODEBOOK_SIZE, objIndexLoad.D);
 	auto d_chunksOffset = raft::make_device_vector<uint32_t>(handle, n_chunks+1);
 	auto d_centroid = raft::make_device_vector<float>(handle, D);			//4*128 ~512B
-	raft::copy(d_centroid.data_handle(), centroid, D, handle.get_stream());
+	raft::copy(d_centroid.data_handle(), centroid, D, streamKernels);
 	objIndexLoad.d_pqTable = d_pqTable.data_handle();
 	objIndexLoad.d_chunksOffset = d_chunksOffset.data_handle();
 	objIndexLoad.d_centroid = d_centroid.data_handle();
@@ -254,9 +254,9 @@ void bang_load(raft::device_resources handle, char* indexfile_path_prefix)
 	}
 
 	// host to device transfer
-	raft::copy(d_pqTable.data_handle(), pqTable_T, 256*D, handle.get_stream());
+	raft::copy(d_pqTable.data_handle(), pqTable_T, 256*D, streamKernels);
 	//gpuErrchk(cudaMemcpy(d_compressedVectors, compressedVectors, (uint32_t long long)(sizeof(uint8_t) * (uint32_t long long)(uChunks)*N),cudaMemcpyHostToDevice));
-	raft::copy(d_chunksOffset.data_handle(), chunksOffset, n_chunks+1, handle.get_stream());
+	raft::copy(d_chunksOffset.data_handle(), chunksOffset, n_chunks+1, streamKernels);
 }
 
 template void bang_load<float>(raft::device_resources, char* );
@@ -357,8 +357,8 @@ void bang_query(raft::device_resources handle, T* query_array, int num_queries,
 	
 
 	// A specific stream to to H2D of the FP vectors
- 	cudaStream_t streamFPTransfers = handle.get_stream_pool().get_stream(0);
- 	cudaStream_t streamKernels = handle.get_stream_pool().get_stream(1);
+ 	cudaStream_t streamKernels = handle.get_stream_pool().get_stream(0);
+ 	cudaStream_t streamFPTransfers = handle.get_stream_pool().get_stream(1);
 
  	cudaStream_t streamParent = handle.get_stream_pool().get_stream(2);
  	cudaStream_t streamChildren = handle.get_stream_pool().get_stream(3);
@@ -448,14 +448,14 @@ void bang_query(raft::device_resources handle, T* query_array, int num_queries,
 		FPSetCoordsList_Counts[i] = 1;
 	}
 
-	gpuErrchk(cudaMemsetAsync(d_pqDistTables.data_handle(),0,sizeof(float) * (objIndexLoad.uChunks * 256 * numQueries), handle.get_stream()));
-	gpuErrchk(cudaMemsetAsync(d_processed_bit_vec.data_handle(), 0, sizeof(bool)*BF_MEMORY*numQueries, handle.get_stream()));
-	gpuErrchk(cudaMemsetAsync(d_parents.data_handle(), 0, sizeof(unsigned)*(numQueries*(SIZEPARENTLIST)), handle.get_stream()));
-	gpuErrchk(cudaMemsetAsync(d_BestLSets_count.data_handle(), 0, sizeof(unsigned)*(numQueries), handle.get_stream()));
-	gpuErrchk(cudaMemsetAsync(d_mark.data_handle(), 1, sizeof(unsigned)*(numQueries), handle.get_stream()));
+	gpuErrchk(cudaMemsetAsync(d_pqDistTables.data_handle(),0,sizeof(float) * (objIndexLoad.uChunks * 256 * numQueries), streamKernels));
+	gpuErrchk(cudaMemsetAsync(d_processed_bit_vec.data_handle(), 0, sizeof(bool)*BF_MEMORY*numQueries, streamKernels));
+	gpuErrchk(cudaMemsetAsync(d_parents.data_handle(), 0, sizeof(unsigned)*(numQueries*(SIZEPARENTLIST)), streamKernels));
+	gpuErrchk(cudaMemsetAsync(d_BestLSets_count.data_handle(), 0, sizeof(unsigned)*(numQueries), streamKernels));
+	gpuErrchk(cudaMemsetAsync(d_mark.data_handle(), 1, sizeof(unsigned)*(numQueries), streamKernels));
 	// Note: parent for row 0, should be medoidID, but initializing entirely to medoidID just hurt
-	raft::copy(d_L2ParentIds.data_handle(), L2ParentIds, numQueries, handle.get_stream());
-	raft::copy(d_FPSetCoordsList_Counts.data_handle(), FPSetCoordsList_Counts, numQueries, handle.get_stream());
+	raft::copy(d_L2ParentIds.data_handle(), L2ParentIds, numQueries, streamKernels);
+	raft::copy(d_FPSetCoordsList_Counts.data_handle(), FPSetCoordsList_Counts, numQueries, streamKernels);
 #ifdef FREE_AFTERUSE
 	free(L2ParentIds);
 	L2ParentIds = NULL;
@@ -501,8 +501,8 @@ void bang_query(raft::device_resources handle, T* query_array, int num_queries,
 	gputimer.Start();
 
 	// Transfer neighbor IDs and count to GPU
-	raft::copy(d_neighbors_temp.data_handle(), neighbors, numQueries*(R+1), handle.get_stream());
-	raft::copy(d_numNeighbors_query_temp.data_handle(), numNeighbors_query, numQueries, handle.get_stream());
+	raft::copy(d_neighbors_temp.data_handle(), neighbors, numQueries*(R+1), streamKernels);
+	raft::copy(d_numNeighbors_query_temp.data_handle(), numNeighbors_query, numQueries, streamKernels);
 	gputimer.Stop();
 	time_transfer += gputimer.Elapsed();
 
@@ -511,7 +511,7 @@ void bang_query(raft::device_resources handle, T* query_array, int num_queries,
 	auto milliStart = log_message("SEARCH STARTED");
 	auto start = std::chrono::high_resolution_clock::now();
 
-	raft::copy(d_queriesFP.data_handle(), queriesFP, (D*numQueries), handle.get_stream());
+	raft::copy(d_queriesFP.data_handle(), queriesFP, (D*numQueries), streamKernels);
 	auto stop = std::chrono::high_resolution_clock::now();
 	time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
 	gputimer.Start();
@@ -547,7 +547,7 @@ void bang_query(raft::device_resources handle, T* query_array, int num_queries,
 	 */
 	compute_neighborDist_par <<<numQueries, numThreads_K2,0, streamKernels >>> (d_neighbors.data_handle(), d_numNeighbors_query.data_handle(), objIndexLoad.d_compressedVectors,
 	d_pqDistTables.data_handle(), d_neighborsDist_query.data_handle(), objIndexLoad.uChunks, R);
-	gpuErrchk(cudaMemcpyAsync(d_iter.data_handle(), &iter, sizeof(unsigned), cudaMemcpyHostToDevice, handle.get_stream()));
+	gpuErrchk(cudaMemcpyAsync(d_iter.data_handle(), &iter, sizeof(unsigned), cudaMemcpyHostToDevice, streamKernels));
 
 	/** [6] Launching the kernel with "X" number of thread-blocks and block size of one. X is calculated below
 	 * A single threads perform the computation for a query.
@@ -717,7 +717,7 @@ void bang_query(raft::device_resources handle, T* query_array, int num_queries,
 
 		++iter;
 
-		gpuErrchk(cudaMemcpyAsync(d_iter.data_handle(), &iter, sizeof(unsigned), cudaMemcpyHostToDevice, handle.get_stream()));
+		gpuErrchk(cudaMemcpyAsync(d_iter.data_handle(), &iter, sizeof(unsigned), cudaMemcpyHostToDevice, streamKernels));
 
 		/** [13] Launching the kernel with "X" number of thread-blocks and block size of one.
 	 	* A songle threads perform the computation for a query.
@@ -730,7 +730,7 @@ void bang_query(raft::device_resources handle, T* query_array, int num_queries,
 		time_B1_vec.push_back(gputimer.Elapsed());
 		start = std::chrono::high_resolution_clock::now();
 
-		raft::copy(&nextIter, d_nextIter.data_handle(), 1, handle.get_stream());  //d_nextIter calculated in compute_parent<<< >>>
+		raft::copy(&nextIter, d_nextIter.data_handle(), 1, streamKernels);  //d_nextIter calculated in compute_parent<<< >>>
 		handle.sync_stream();
 		// Note: Default Stream operations (cmputation or memory transfers) cannot overlap with operatiosn on other sterrams.
 		// Hence, the above operation (in deffault stream) could act as a synchronization mechanism to ensure all kernels are done (next parent ready)
@@ -749,7 +749,7 @@ void bang_query(raft::device_resources handle, T* query_array, int num_queries,
 	// Lets ensure we have received all the FP vectors before starting the Re-ranking. 
 	// We need FP vectors to calculate exact distances now. Compressed vectors are not used hereafter
 	cudaStreamSynchronize(streamFPTransfers);
-	compute_L2Dist<<<numQueries, K4_blockSize, D * sizeof(T), handle.get_stream()>>> (d_FPSetCoordsList.data_handle(),
+	compute_L2Dist<<<numQueries, K4_blockSize, D * sizeof(T), streamKernels>>> (d_FPSetCoordsList.data_handle(),
 												d_FPSetCoordsList_Counts.data_handle(),
 												d_queriesFP.data_handle(),
 												d_L2ParentIds.data_handle(),
@@ -760,7 +760,7 @@ void bang_query(raft::device_resources handle, T* query_array, int num_queries,
 
 
 	// We have the exact distances of each each candidate. Lets pick the topk neighbours.
-	compute_NearestNeighbours<<<numQueries, MAX_PARENTS_PERQUERY, 0, handle.get_stream()>>> (d_L2ParentIds.data_handle(),
+	compute_NearestNeighbours<<<numQueries, MAX_PARENTS_PERQUERY, 0, streamKernels>>> (d_L2ParentIds.data_handle(),
 												d_L2ParentIds_aux.data_handle(),
 												d_FPSetCoordsList_Counts.data_handle(),
 												d_L2distances.data_handle(),
@@ -776,9 +776,9 @@ void bang_query(raft::device_resources handle, T* query_array, int num_queries,
 	start = std::chrono::high_resolution_clock::now();
 
 	raft::copy(nearestNeighbours, d_nearestNeighbours.data_handle(), recall_at * numQueries,
-				handle.get_stream());
+				streamKernels);
 	raft::copy(nearestNeighbours_dist, d_L2distances.data_handle(), recall_at * numQueries,
-				handle.get_stream());
+				streamKernels);
 	handle.sync_stream();				
 	stop = std::chrono::high_resolution_clock::now();
 	time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
