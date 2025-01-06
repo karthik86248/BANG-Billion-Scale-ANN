@@ -46,7 +46,7 @@ limitations under the License.
 
 // The size of Bloom Filter.
 #define BF_ENTRIES  399887U // BF is maintained per query (prime number close to 4k)
-							// use 10007, 4999, 3001, (1999 skip), 1501, 999, 299  for lower recalls
+						   // For lower recall values, possible values used:  10007 (skip), 4999, 3001, (1999 skip), 1501, 999 (skip), 299 (skip)  
 const unsigned BF_MEMORY = (BF_ENTRIES & 0xFFFFFFFC) + sizeof(unsigned); // 4-byte mem aligned size for actual allocation
 
 // Indicates static upper bound on search iterations performed
@@ -74,7 +74,7 @@ static GPUInstance oGPUInst;
 static HostInstance oHostInst;
 
 template<typename T>
-void bang_load(char* indexfile_path_prefix)
+bool bang_load(char* indexfile_path_prefix)
 {
 	string diskann_Generatedfiles_path = string(indexfile_path_prefix);
 	string pqTable_file = diskann_Generatedfiles_path +  PQ_PIVOTS_FILE_SUFFIX;//string(argv[1]); // Pivot files
@@ -83,37 +83,38 @@ void bang_load(char* indexfile_path_prefix)
 	string graphMetadata_file = diskann_Generatedfiles_path + GRAPH_INDEX_METADATA_FILE_SUFFIX;//string(argv[3]);
     string chunkOffsets_file = diskann_Generatedfiles_path + PQ_CHUNK_OFFSETS_FILE_SUFFIX ;//string(argv[5]);
 	string centroid_file = diskann_Generatedfiles_path + PQ_CENTROID_FILE_SUFFIX;////string(argv[2]);
+	bool bRet = true;
 
 	// Check if files exist
 	ifstream in1(pqTable_file, std::ios::binary);
 	if(!in1.is_open()){
 		printf("Error.. Could not open the PQ Pivots File: %s", pqTable_file.c_str() );
-		return;
+		return false;
 	}
 
 	ifstream in2(compressedVector_file, std::ios::binary);
 	if(!in2.is_open()){
 		printf("Error.. Could not open the PQ Compressed Vectors File: %s", compressedVector_file.c_str() );
-		return;
+		return false;
 	}
 
 
 	ifstream in3(graphAdjListAndFP_file, std::ios::binary);
 	if(!in3.is_open()){
 		printf("Error.. Could not open the Graph Index File: %s", graphAdjListAndFP_file.c_str());
-		return;
+		return false;
 	}
 
 	// Reading the Graph Metadata File
 	GraphMedataData objGrapMetaData;
-	ifstream in5(graphMetadata_file, std::ios::binary);
-	if(!in5.is_open()){
+	ifstream in4(graphMetadata_file, std::ios::binary);
+	if(!in4.is_open()){
 		printf("Error.. Could not open the Metadata File: %s\n", graphMetadata_file.c_str());
-		return;
+		return false;
 	}
 
 	// Load Graph Metadata first
-	in5.read((char*)&objGrapMetaData, sizeof(GraphMedataData));
+	in4.read((char*)&objGrapMetaData, sizeof(GraphMedataData));
 	cout << "Metadata : " << objGrapMetaData.ullMedoid << ", " << objGrapMetaData.ulluIndexEntryLen  << ", " << objGrapMetaData.uDatatype  <<
 	", " << objGrapMetaData.uDim << ", " << objGrapMetaData.uDegree << ", " << objGrapMetaData.uDatasetSize << endl;
 
@@ -125,18 +126,39 @@ void bang_load(char* indexfile_path_prefix)
 
 
 	// Loading PQTable (binary)
-	float *pqTable = (float*) malloc(sizeof(float) * (256 * oInputData.D)); // Contains pivot coordinates
+	float *pqTable = NULL;
+	float *pqTable_T  = NULL;
+	unsigned *chunksOffset = NULL;
+	float *centroid = NULL;
+	uint8_t* compressedVectors = NULL;
+	uint64_t numr = 0;
+	uint64_t numc = 0;
+	unsigned int N = 0;
+	unsigned int uChunks = 0;
+	unsigned* puNeighbour = NULL; // Very first neighbour
+	unsigned* puNeighbour1 = NULL; // Very Last neighbour
+	unsigned *puNumNeighbours = NULL;
+	unsigned *puNumNeighbours1 = NULL;
+	
+	pqTable = (float*) malloc(sizeof(float) * (256 * oInputData.D)); // Contains pivot coordinates
 	if (NULL == pqTable)
 	{
 		printf("Error.. Malloc failed PQ Table\n");
-		return;
+		return false;
 	}
 	in1.seekg(8);
 	in1.read((char*)pqTable,sizeof(float)*256*oInputData.D);
 	in1.close();
 	cout << "Finished reading :" << pqTable_file << endl;
 	// transpose pqTable
-	float *pqTable_T = (float*) malloc(sizeof(float) * (256 * oInputData.D));
+	pqTable_T = (float*) malloc(sizeof(float) * (256 * oInputData.D));
+	if (NULL == pqTable_T)
+	{
+		printf("Error.. Malloc failed PQ Table Transpose\n");
+		bRet = false;
+		goto cleanup;
+	}
+
 	for(unsigned row = 0; row < 256; ++row) {
 		for(unsigned col = 0; col < oInputData.D; ++col) {
 			pqTable_T[col* 256 + row] = pqTable[row*oInputData.D+col];
@@ -144,37 +166,36 @@ void bang_load(char* indexfile_path_prefix)
 	}
 
 	// Loading chunk offsets
-	unsigned *chunksOffset = NULL; //(unsigned*) malloc(sizeof(unsigned) * (oInputData.n_chunks+1));
-	uint64_t numr = oInputData.uChunks + 1;
-	uint64_t numc = 1;
-	load_bin<uint32_t>(chunkOffsets_file, chunksOffset, numr, numc);	//Import the chunkoffset file
+	bRet = load_bin<uint32_t>(chunkOffsets_file, chunksOffset, numr, numc);	//Import the chunkoffset file
+	if (bRet == false)
+		goto cleanup;
 	//cout << "Loaded:" <<  chunkOffsets_file << endl;
 
 	// Loading centroid coordinates
 	numr = oInputData.uChunks;
-	float* centroid = NULL; // (unsigned*) malloc(sizeof(float) * (oInputData.n_chunks));;
-	load_bin<float>(centroid_file, centroid, numr, numc);				//Import centroid from centroid file
+	 // (unsigned*) malloc(sizeof(float) * (oInputData.n_chunks));;
+	bRet = load_bin<float>(centroid_file, centroid, numr, numc);				//Import centroid from centroid file
+	if (bRet == false)
+		goto cleanup;
 	//cout << "Loaded:" <<  centroid_file << endl;
 
 	
 	// Loading PQ Compressed Vector (binary)
-	unsigned int N = 0;
+	
 	in2.read((char*)&N, sizeof(int));
 	cout << "Reading:" <<  compressedVector_file<< endl;
 	cout << "No of points in Dataset = " << N	 << endl;
-
-	unsigned int uChunks = 0;
 	in2.read((char*)&uChunks, sizeof(int));
 	cout << "# PQ Chunks = " << uChunks << endl;
 	oInputData.uChunks = uChunks;
 
-	uint8_t* compressedVectors = NULL;
 	compressedVectors = (uint8_t*) malloc(sizeof(uint8_t) * uChunks * N);
 
 	if (NULL == compressedVectors)
 	{
 		printf("Error.. Malloc failed for Compressed Vectors\n");
-		return;
+		bRet = false;
+		goto cleanup;
 	}
 
 	in2.read((char*)compressedVectors, sizeof(uint8_t)*N*uChunks);
@@ -185,7 +206,6 @@ void bang_load(char* indexfile_path_prefix)
 	gpuErrchk(cudaMalloc(&oInputData.d_compressedVectors, sizeof(uint8_t) * N * uChunks)); 	//100M*100 ~10GB
 	gpuErrchk(cudaMemcpy(oInputData.d_compressedVectors, compressedVectors, (unsigned long long)(sizeof(uint8_t) * (unsigned long long)(uChunks)*N),
 	cudaMemcpyHostToDevice));
-
 	free(compressedVectors);
 	compressedVectors = NULL;
 
@@ -198,15 +218,18 @@ void bang_load(char* indexfile_path_prefix)
 	gpuErrchk(cudaMemcpy(oInputData.d_chunksOffset, chunksOffset, sizeof(unsigned) * (oInputData.uChunks+1), cudaMemcpyHostToDevice));
 	gpuErrchk(cudaMemcpy(oInputData.d_centroid, centroid, sizeof(float) * (oInputData.D), cudaMemcpyHostToDevice));
 
-
-
 	// Load the Vamana(DiskANN) Graph Index
 	oInputData.size_indexfile  = caclulate_filesize(graphAdjListAndFP_file.c_str());
 	oInputData.pIndex = (uint8_t*)malloc(oInputData.size_indexfile);
 	if (NULL == oInputData.pIndex)
 	{
 		printf("Error.. Malloc failed for Graph Index.\n");
-		return;
+		gpuErrchk(cudaFree(oInputData.d_compressedVectors));
+		gpuErrchk(cudaFree(&oInputData.d_pqTable));
+		gpuErrchk(cudaFree(&oInputData.d_chunksOffset));
+		gpuErrchk(cudaFree(&oInputData.d_centroid)); 
+		bRet = false;
+		goto cleanup;
 	}
 
 	log_message("Index Load Started");
@@ -217,10 +240,6 @@ void bang_load(char* indexfile_path_prefix)
 	// Sanity test start
 	// to see if the Index file was loaded properly
 	// Read the first and last neighbour
-	unsigned* puNeighbour = NULL; // Very first neighbour
-	unsigned* puNeighbour1 = NULL; // Very Last neighbour
-	unsigned *puNumNeighbours = NULL;
-	unsigned *puNumNeighbours1 = NULL;
 
 	// First neighbour calculation
 	puNumNeighbours = (unsigned*)(oInputData.pIndex+((oInputData.ullIndex_Entry_LEN*0)+ (sizeof(T)*oInputData.D) ));
@@ -240,7 +259,7 @@ void bang_load(char* indexfile_path_prefix)
 	cout << "BF Size : " << BF_ENTRIES << "\t"  << endl;
 
 
-
+cleanup:
 	free(pqTable);
 	pqTable = NULL;
 	free(pqTable_T);
@@ -249,11 +268,12 @@ void bang_load(char* indexfile_path_prefix)
 	chunksOffset = NULL;
 	free(centroid);
 	centroid = NULL;
+	return bRet;
 }
 
-template void bang_load<float>(char* );
-template void bang_load<uint8_t>(char* );
-template void bang_load<int8_t>(char* );
+template bool bang_load<float>(char* );
+template bool bang_load<uint8_t>(char* );
+template bool bang_load<int8_t>(char* );
 // ToDo: Add definitions for other dataset types e.g. int8_t for MSSPACEV dataset after testing
 
 void bang_load_c(char* pszPath)

@@ -285,7 +285,7 @@ inline std::string getValues(T* data, size_t num) {
 }
 
 template<typename T>
-inline void load_bin_impl(std::basic_istream<char>& reader,
+inline bool load_bin_impl(std::basic_istream<char>& reader,
 		size_t actual_file_size, T*& data, size_t& npts,
 		size_t& dim) {
 	int npts_i32, dim_i32;
@@ -307,7 +307,7 @@ inline void load_bin_impl(std::basic_istream<char>& reader,
 		std::cout << stream.str();
 		//throw std::ANNException(stream.str(), -1, __FUNCSIG__, __FILE__,
 		//                           __LINE__);
-		exit(1);
+		return false ;
 	}
 
 	data = new T[npts * dim];
@@ -315,20 +315,26 @@ inline void load_bin_impl(std::basic_istream<char>& reader,
 
 	//std::cout << "Last bytes: " 	<< getValues<T>(data + (npts - 2) * dim, dim);
 	std::cout << "Finished reading bin file." << std::endl;
-
+	return true;
 }
 
 
 
 template<typename T>
-inline void load_bin(const std::string& bin_file, T*& data, size_t& npts,
+inline bool load_bin(const std::string& bin_file, T*& data, size_t& npts,
 		size_t& dim) {
 
 	std::cout << "Reading bin file " << bin_file.c_str() << " ..." 	<< std::endl;
 	std::ifstream reader(bin_file, std::ios::binary | std::ios::ate);
+	if (reader.fail())
+	{
+		std::cout << "Reading bin file " << bin_file.c_str() << " failed. Error:" 	<< strerror(errno) << std::endl;
+		return false;
+	}
+		
 	uint64_t      fsize = reader.tellg();
 	reader.seekg(0);
 
-	load_bin_impl<T>(reader, fsize, data, npts, dim);
+	return load_bin_impl<T>(reader, fsize, data, npts, dim);
 }
 #endif // PARANN_H_

@@ -339,7 +339,11 @@ template <typename T>
 int run_anns(int argc, char **argv)
 {
 
-	bang_load<T>(argv[1]);
+	if (false == bang_load<T>(argv[1]))
+	{
+		cout << "Error: Bang_load failed" << endl;
+		return -1;
+	}	
 	//sleep(10);
 	// load the queries
 	T *queriesFP = NULL;
@@ -398,7 +402,7 @@ int run_anns(int argc, char **argv)
 //            if (nIter == 0)
             {
                 cout << "L\t" << "Time \t" << "QPS\t" << "\t" << recall_param <<"-r@" << recall_param << endl;
-			    cout << "=\t" << "==== \t" << "===\t" << "\t===" << endl;
+			    cout << "--\t" << "---- \t" << "---\t" << "\t------" << endl;
             }
 			}
 			else 
@@ -406,7 +410,7 @@ int run_anns(int argc, char **argv)
                 if (nIter == 0)
                 {
                     cout << "L\t" << "Time \t" << "QPS\t" << "\t" << recall_param <<"-r@" << recall_param << endl;
-                    cout << "=\t" << "==== \t" << "===\t" << "\t===" << endl;
+                    cout << "--\t" << "---- \t" << "---\t" << "\t------" << endl;
                 }
                 else
 				    nWLLen = nWLLen + (nStepSize);
@@ -527,7 +531,7 @@ int run_anns(int argc, char **argv)
 				nearestNeighbours = NULL;
 				free(nearestNeighbours_dist);
 				nearestNeighbours_dist = NULL;
-				delete[] gt_dim;
+				delete[] gt_ids;
 				delete[] gt_dists; 
 			}
 			bang_free();
