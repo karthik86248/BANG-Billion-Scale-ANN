@@ -36,7 +36,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -fopenmp")
 set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -Xcompiler -fopenmp")
 
 # Define the shared library target (bang)
-cuda_add_library(bang SHARED parANN.cu)
+cuda_add_library(bang SHARED bang_search.cu)
 
 # Ensure position-independent code and separable compilation
 set_target_properties(bang PROPERTIES
@@ -44,11 +44,10 @@ set_target_properties(bang PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
 
-target_link_libraries(bang raft::raft)
-
 # Specify the test driver executable
-# add_executable(bang_search test_driver.cpp)
-# target_link_libraries(bang_search bang dl)
+target_link_libraries(bang raft::raft)
+add_executable(bang_search test_driver.cpp)
+target_link_libraries(bang_search PRIVATE bang dl)
 
 # Clean rule (optional, CMake handles this with 'make clean')
-# set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY CLEAN_DIRECTORIES "bang.so;bang_search")
+set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY CLEAN_DIRECTORIES "bang.so;bang_search")
