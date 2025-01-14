@@ -330,7 +330,7 @@ void preprocess_query_file(string queryPointsFP_file, int numQueries)
 			}
 		}
 	}
-	save_bin(queryPointsFP_file + "_transfromed", queriesFP_transformed, numQueries, Dim + 1);
+	save_bin(queryPointsFP_file + "_transformed", queriesFP_transformed, numQueries, Dim + 1);
 	free(queriesFP);
 	free(queriesFP_transformed);
 }
