@@ -338,8 +338,8 @@ void preprocess_query_file(string queryPointsFP_file, int numQueries)
 template <typename T>
 int run_anns(int argc, char **argv)
 {
-
-	if (false == bang_load<T>(argv[1]))
+	BANGSearch<T> objBANG;
+	if (false == objBANG.bang_load(argv[1]))
 	{
 		cout << "Error: Bang_load failed" << endl;
 		return -1;
@@ -384,8 +384,6 @@ int run_anns(int argc, char **argv)
 	string strMode("MODE_AUTO");
 	if(argc == 8)
 		strMode = MODE_INTERACTIVE;
-
-
 	
 		do
 		{
@@ -420,8 +418,8 @@ int run_anns(int argc, char **argv)
 			}
 
                 
-			bang_set_searchparams(recall_param, nWLLen, uDistFunc);
-			bang_alloc<T>(numQueries);
+			objBANG.bang_set_searchparams(recall_param, nWLLen, uDistFunc);
+			objBANG.bang_alloc(numQueries);
 
 			for (int nCounter = 0; nCounter < 5; nCounter++)
 			{
@@ -431,10 +429,10 @@ int run_anns(int argc, char **argv)
 				final_bestL1.resize(numQueries);
 
 	
-				bang_init<T>(numQueries);
+				objBANG.bang_init(numQueries);
 				auto milliStart = checkpoint_time_millisec ();
 
-				bang_query<T>(queriesFP, numQueries, nearestNeighbours, nearestNeighbours_dist);
+				objBANG.bang_query(queriesFP, numQueries, nearestNeighbours, nearestNeighbours_dist);
 
 				auto milliEnd = checkpoint_time_millisec ();
 				double totalTime_wallclock = milliEnd - milliStart;
@@ -534,7 +532,7 @@ int run_anns(int argc, char **argv)
 				delete[] gt_ids;
 				delete[] gt_dists; 
 			}
-			bang_free();
+			objBANG.bang_free();
 			if (MODE_INTERACTIVE == strMode)
 			{
                 char c = 'n';
@@ -552,8 +550,9 @@ int run_anns(int argc, char **argv)
 
 	}*/
 
-	bang_unload();
+	objBANG.bang_unload();
 	free(queriesFP);
+	
 	return 0;
 }
 /*

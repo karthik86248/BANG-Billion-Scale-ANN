@@ -29,65 +29,75 @@ typedef enum _DistFunc
 	ENUM_DIST_MIPS, // Max Inner Product Search
 } DistFunc;
 #define MIPS_EXTRA_DIM (1) // To transform MIPS to L2 distance caluclation, extra dim is added to base dataset adn query
-                          // The index file o/p from DiskANN already has 1 DIM added to dataset. We(BANG) add 1 DIM to the query 
+                          // The index file o/p from DiskANN already has 1 DIM added to dataset. We(BANG) add 1 DIM to the query
                           // at rum time
 
 
-/*! @brief Load the graph index, compressed vectors etc into CPU/GPU memory.
-*
-* The graph index, compressed vectors has to be generated using DiskANN.
-* Search can be performed bang_query() .
-*
-* @param[in] indexfile_path_prefix Absolute path location where DiskANN generated files are present. (including the file prefix)
-
-*/
 template<typename T>
-bool bang_load( char* indexfile_path_prefix);
+class BANGSearch
+{
+    void* m_pImpl;
 
-// Note:  Equivalent "C" APIs have also been provided. For invocation from Python scripts (using CDLL package)
-extern "C" void bang_load_c( char* indexfile_path_prefix);
+    public:
+    BANGSearch();
+    virtual ~BANGSearch();
+
+    /*! @brief Load the graph index, compressed vectors etc into CPU/GPU memory.
+    *
+    * The graph index, compressed vectors has to be generated using DiskANN.
+    * Search can be performed bang_query() .
+    *
+    * @param[in] indexfile_path_prefix Absolute path location where DiskANN generated files are present.
+    *               (including the file prefix)
+    */
+    bool bang_load( char* indexfile_path_prefix);
+
+    void bang_alloc(int numQueries);
 
 
-void bang_set_searchparams(int recall, 
+    void bang_init(int numQueries);
+
+    void bang_set_searchparams(int recall,
                             int worklist_length,
                             DistFunc nDistFunc=ENUM_DIST_L2);
 
+
+    /*! @brief Runs search queries on the laoded index..
+    *
+    * The graph index, compressed vectors has to be generated using DiskANN.
+    * Search can be performed bang_query() .
+    *
+    * @param[in] query_file Absolute path of the query file in bin format.
+    * @param[in] groundtruth_file Absolute path of the groundtruth file in bin format (generated usign DiskANN).
+    * @param[in] num_queries Number of queries to be used for the search.
+    * @param[in] recal_param k-recall@k.
+    */
+    void bang_query(T* query_array,
+                    int num_queries,
+                    result_ann_t* nearestNeighbours,
+					float* nearestNeighbours_dist );
+
+    void bang_free();
+
+    void bang_unload();
+
+};
+template class BANGSearch<float>;
+template class BANGSearch<uint8_t>;
+template class BANGSearch<int8_t>;
+
+#if 0
+// Note:  Equivalent "C" APIs have also been provided. For invocation from Python scripts (using CDLL package)
+extern "C" void bang_load_c( char* indexfile_path_prefix);
+
 extern "C"  void bang_set_searchparams_c(int recall, int worklist_length, DistFunc nDistFunc=ENUM_DIST_L2);
 
-template<typename T>
-void bang_alloc(int numQueries);
-
-template<typename T>
-void bang_init(int numQueries);
-
-void bang_free();
-
-
-/*! @brief Runs search queries on the laoded index..
-*
-* The graph index, compressed vectors has to be generated using DiskANN.
-* Search can be performed bang_query() .
-*
-* @param[in] query_file Absolute path of the query file in bin format.
-* @param[in] groundtruth_file Absolute path of the groundtruth file in bin format (generated usign DiskANN).
-* @param[in] num_queries Number of queries to be used for the search.
-* @param[in] recal_param k-recall@k.
-
-*/
-
-template<typename T>
-void bang_query(T* query_array, 
-                    int num_queries, 
+extern "C" void bang_query_c(uint8_t* query_array,
+                    int num_queries,
                     result_ann_t* nearestNeighbours,
 					float* nearestNeighbours_dist );
-
-extern "C" void bang_query_c(uint8_t* query_array, 
-                    int num_queries, 
-                    result_ann_t* nearestNeighbours,
-					float* nearestNeighbours_dist );
-
-
-void bang_unload();
 
 extern "C" void bang_unload_c( );
+#endif
+
 #endif //BANG_H_
