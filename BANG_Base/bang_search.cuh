@@ -337,4 +337,36 @@ inline bool load_bin(const std::string& bin_file, T*& data, size_t& npts,
 
 	return load_bin_impl<T>(reader, fsize, data, npts, dim);
 }
+
+template<typename T>
+class BANGSearchInner
+{
+	IndexLoad m_objInputData;
+	SearchParams m_objSearchParams;
+	GPUInstance m_objGPUInst;
+	HostInstance m_objHostInst;
+
+public:
+    
+    bool bang_load( char* indexfile_path_prefix);
+
+    void bang_alloc(int numQueries);
+    
+    void bang_init(int numQueries);
+
+    void bang_set_searchparams(int recall, 
+                            int worklist_length,
+                            DistFunc nDistFunc=ENUM_DIST_L2);
+    
+    void bang_query(T* query_array, 
+                    int num_queries, 
+                    result_ann_t* nearestNeighbours,
+					float* nearestNeighbours_dist );
+
+    void bang_free();
+
+	void bang_unload();
+
+};
+
 #endif // PARANN_H_

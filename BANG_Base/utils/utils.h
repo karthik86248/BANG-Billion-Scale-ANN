@@ -54,7 +54,8 @@ unsigned long long log_message (const char* message)
 	auto duration = now.time_since_epoch();
 	auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
 	struct tm *local = localtime(&ctimenow_obj);
-	std::cout <<  local->tm_hour <<":" << local->tm_min <<":"<< local->tm_sec << " [ " << millis << " ] : " << message << std::endl;
+	std::cout <<  local->tm_mday << ":" << local->tm_mon  << ":" << local->tm_year << ":" \
+			  <<  local->tm_hour << ":" << local->tm_min << ":" << local->tm_sec << " [" << millis << "] : " << message << std::endl;
 	return millis;
 }
 

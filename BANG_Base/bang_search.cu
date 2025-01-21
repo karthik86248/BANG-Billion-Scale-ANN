@@ -1,16 +1,3 @@
-/* Copyright 2024 Indian Institute Of Technology Hyderbad, India. All Rights Reserved.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-    http://www.apache.org/licenses/LICENSE-2.0
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-==============================================================================*/
-// Authors: Karthik V., Saim Khan, Somesh Singh
-//
 
 // bang headers
 #include "bang_search.cuh"
@@ -32,13 +19,7 @@ limitations under the License.
 #include <cstdint>
 #include <vector>
 
-#include <raft/core/device_mdarray.hpp>
-#include <raft/core/device_mdspan.hpp>
-#include <raft/core/device_resources.hpp>
-#include <raft/core/host_mdarray.hpp>
-#include <raft/core/host_mdspan.hpp>
-#include <raft/core/pinned_mdarray.hpp>
-#include <raft/core/resource/cuda_stream_pool.hpp>
+
 
 #define MAX_R 64 // Max. node degree supported
 
@@ -52,7 +33,7 @@ limitations under the License.
 
 // The size of Bloom Filter.
 #define BF_ENTRIES  399887U // BF is maintained per query (prime number close to 4k)
-							// use 10007, 4999, 3001, (1999 skip), 1501, 999, 299  for lower recalls
+						   // For lower recall values, possible values used:  10007 (skip), 4999, 3001, (1999 skip), 1501, 999 (skip), 299 (skip)  
 const unsigned BF_MEMORY = (BF_ENTRIES & 0xFFFFFFFC) + sizeof(unsigned); // 4-byte mem aligned size for actual allocation
 
 // Indicates static upper bound on search iterations performed
@@ -80,7 +61,7 @@ static GPUInstance oGPUInst;
 static HostInstance oHostInst;
 
 template<typename T>
-void bang_load(raft::device_resources handle, char* indexfile_path_prefix)
+bool bang_load(char* indexfile_path_prefix)
 {
 	string diskann_Generatedfiles_path = string(indexfile_path_prefix);
 	string pqTable_file = diskann_Generatedfiles_path +  PQ_PIVOTS_FILE_SUFFIX;//string(argv[1]); // Pivot files
@@ -89,37 +70,38 @@ void bang_load(raft::device_resources handle, char* indexfile_path_prefix)
 	string graphMetadata_file = diskann_Generatedfiles_path + GRAPH_INDEX_METADATA_FILE_SUFFIX;//string(argv[3]);
     string chunkOffsets_file = diskann_Generatedfiles_path + PQ_CHUNK_OFFSETS_FILE_SUFFIX ;//string(argv[5]);
 	string centroid_file = diskann_Generatedfiles_path + PQ_CENTROID_FILE_SUFFIX;////string(argv[2]);
+	bool bRet = true;
 
 	// Check if files exist
 	ifstream in1(pqTable_file, std::ios::binary);
 	if(!in1.is_open()){
 		printf("Error.. Could not open the PQ Pivots File: %s", pqTable_file.c_str() );
-		return;
+		return false;
 	}
 
 	ifstream in2(compressedVector_file, std::ios::binary);
 	if(!in2.is_open()){
 		printf("Error.. Could not open the PQ Compressed Vectors File: %s", compressedVector_file.c_str() );
-		return;
+		return false;
 	}
 
 
 	ifstream in3(graphAdjListAndFP_file, std::ios::binary);
 	if(!in3.is_open()){
 		printf("Error.. Could not open the Graph Index File: %s", graphAdjListAndFP_file.c_str());
-		return;
+		return false;
 	}
 
 	// Reading the Graph Metadata File
 	GraphMedataData objGrapMetaData;
-	ifstream in5(graphMetadata_file, std::ios::binary);
-	if(!in5.is_open()){
+	ifstream in4(graphMetadata_file, std::ios::binary);
+	if(!in4.is_open()){
 		printf("Error.. Could not open the Metadata File: %s\n", graphMetadata_file.c_str());
-		return;
+		return false;
 	}
 
 	// Load Graph Metadata first
-	in5.read((char*)&objGrapMetaData, sizeof(GraphMedataData));
+	in4.read((char*)&objGrapMetaData, sizeof(GraphMedataData));
 	cout << "Metadata : " << objGrapMetaData.ullMedoid << ", " << objGrapMetaData.ulluIndexEntryLen  << ", " << objGrapMetaData.uDatatype  <<
 	", " << objGrapMetaData.uDim << ", " << objGrapMetaData.uDegree << ", " << objGrapMetaData.uDatasetSize << endl;
 
@@ -131,18 +113,39 @@ void bang_load(raft::device_resources handle, char* indexfile_path_prefix)
 
 
 	// Loading PQTable (binary)
-	float *pqTable = (float*) malloc(sizeof(float) * (256 * oInputData.D)); // Contains pivot coordinates
+	float *pqTable = NULL;
+	float *pqTable_T  = NULL;
+	unsigned *chunksOffset = NULL;
+	float *centroid = NULL;
+	uint8_t* compressedVectors = NULL;
+	uint64_t numr = 0;
+	uint64_t numc = 0;
+	unsigned int N = 0;
+	unsigned int uChunks = 0;
+	unsigned* puNeighbour = NULL; // Very first neighbour
+	unsigned* puNeighbour1 = NULL; // Very Last neighbour
+	unsigned *puNumNeighbours = NULL;
+	unsigned *puNumNeighbours1 = NULL;
+	
+	pqTable = (float*) malloc(sizeof(float) * (256 * oInputData.D)); // Contains pivot coordinates
 	if (NULL == pqTable)
 	{
 		printf("Error.. Malloc failed PQ Table\n");
-		return;
+		return false;
 	}
 	in1.seekg(8);
 	in1.read((char*)pqTable,sizeof(float)*256*oInputData.D);
 	in1.close();
 	cout << "Finished reading :" << pqTable_file << endl;
 	// transpose pqTable
-	float *pqTable_T = (float*) malloc(sizeof(float) * (256 * oInputData.D));
+	pqTable_T = (float*) malloc(sizeof(float) * (256 * oInputData.D));
+	if (NULL == pqTable_T)
+	{
+		printf("Error.. Malloc failed PQ Table Transpose\n");
+		bRet = false;
+		goto cleanup;
+	}
+
 	for(unsigned row = 0; row < 256; ++row) {
 		for(unsigned col = 0; col < oInputData.D; ++col) {
 			pqTable_T[col* 256 + row] = pqTable[row*oInputData.D+col];
@@ -150,37 +153,36 @@ void bang_load(raft::device_resources handle, char* indexfile_path_prefix)
 	}
 
 	// Loading chunk offsets
-	unsigned *chunksOffset = NULL; //(unsigned*) malloc(sizeof(unsigned) * (oInputData.n_chunks+1));
-	uint64_t numr = oInputData.uChunks + 1;
-	uint64_t numc = 1;
-	load_bin<uint32_t>(chunkOffsets_file, chunksOffset, numr, numc);	//Import the chunkoffset file
+	bRet = load_bin<uint32_t>(chunkOffsets_file, chunksOffset, numr, numc);	//Import the chunkoffset file
+	if (bRet == false)
+		goto cleanup;
 	//cout << "Loaded:" <<  chunkOffsets_file << endl;
 
 	// Loading centroid coordinates
 	numr = oInputData.uChunks;
-	float* centroid = NULL; // (unsigned*) malloc(sizeof(float) * (oInputData.n_chunks));;
-	load_bin<float>(centroid_file, centroid, numr, numc);				//Import centroid from centroid file
+	 // (unsigned*) malloc(sizeof(float) * (oInputData.n_chunks));;
+	bRet = load_bin<float>(centroid_file, centroid, numr, numc);				//Import centroid from centroid file
+	if (bRet == false)
+		goto cleanup;
 	//cout << "Loaded:" <<  centroid_file << endl;
 
 	
 	// Loading PQ Compressed Vector (binary)
-	unsigned int N = 0;
+	
 	in2.read((char*)&N, sizeof(int));
 	cout << "Reading:" <<  compressedVector_file<< endl;
 	cout << "No of points in Dataset = " << N	 << endl;
-
-	unsigned int uChunks = 0;
 	in2.read((char*)&uChunks, sizeof(int));
 	cout << "# PQ Chunks = " << uChunks << endl;
 	oInputData.uChunks = uChunks;
 
-	uint8_t* compressedVectors = NULL;
 	compressedVectors = (uint8_t*) malloc(sizeof(uint8_t) * uChunks * N);
 
 	if (NULL == compressedVectors)
 	{
 		printf("Error.. Malloc failed for Compressed Vectors\n");
-		return;
+		bRet = false;
+		goto cleanup;
 	}
 
 	in2.read((char*)compressedVectors, sizeof(uint8_t)*N*uChunks);
@@ -188,28 +190,20 @@ void bang_load(raft::device_resources handle, char* indexfile_path_prefix)
 	cout << "Finished reading bin file." << endl;
 	// To reduce Peak Host memory usage, loading compressed vectors to CPU and transferring to GPU and releasing host memory
 	printf("Transferring Compressed Vectors to GPU ...\n");
+	gpuErrchk(cudaMalloc(&oInputData.d_compressedVectors, sizeof(uint8_t) * N * uChunks)); 	//100M*100 ~10GB
 	gpuErrchk(cudaMemcpy(oInputData.d_compressedVectors, compressedVectors, (unsigned long long)(sizeof(uint8_t) * (unsigned long long)(uChunks)*N),
 	cudaMemcpyHostToDevice));
-	auto d_compressedVectors = raft::make_device_matrix<uint8_t, uint32_t>(handle, N, uChunks); 	//100M*100 ~10GB
-	raft::copy(d_compressedVectors, compressedVectors, (unsigned long long)(uChunks)*N, handle.get_stream());
-	oInputData.d_compressedVectors = d_compressedVectors;
-
 	free(compressedVectors);
 	compressedVectors = NULL;
 
-	auto d_pqTable = raft::make_device_matrix<float>(handle, 256, oInputData.D);
-	oInputData.d_pqTable = d_pqTable;
-	auto d_chunksOffset = raft::make_device_vector<uint32_t>(handle, oInputData.uChunks+1);
-	oInputData.d_chunksOffset = d_chunksOffset;
-	auto d_centroid = raft::make_device_vector<float>(handle, oInputData.D);
-	oInputData.d_centroid = d_centroid;
+	gpuErrchk(cudaMalloc(&oInputData.d_pqTable, sizeof(float) * (256*oInputData.D)));
+	gpuErrchk(cudaMalloc(&oInputData.d_chunksOffset, sizeof(unsigned) * (oInputData.uChunks+1)));
+	gpuErrchk(cudaMalloc(&oInputData.d_centroid, sizeof(float) * (oInputData.D)));
 
 	// host to device transfer
-	gpuErrchk(cudaMemcpyAsync(oInputData.d_pqTable, pqTable_T, sizeof(float) * (256*oInputData.D), cudaMemcpyHostToDevice, handle.get_stream()));
-	gpuErrchk(cudaMemcpyAsync(oInputData.d_chunksOffset, chunksOffset, sizeof(unsigned) * (oInputData.uChunks+1), cudaMemcpyHostToDevice, handle.get_stream()));
-	gpuErrchk(cudaMemcpyAsync(oInputData.d_centroid, centroid, sizeof(float) * (oInputData.D), cudaMemcpyHostToDevice, handle.get_stream()));
-
-
+	gpuErrchk(cudaMemcpy(oInputData.d_pqTable, pqTable_T, sizeof(float) * (256*oInputData.D), cudaMemcpyHostToDevice));
+	gpuErrchk(cudaMemcpy(oInputData.d_chunksOffset, chunksOffset, sizeof(unsigned) * (oInputData.uChunks+1), cudaMemcpyHostToDevice));
+	gpuErrchk(cudaMemcpy(oInputData.d_centroid, centroid, sizeof(float) * (oInputData.D), cudaMemcpyHostToDevice));
 
 	// Load the Vamana(DiskANN) Graph Index
 	oInputData.size_indexfile  = caclulate_filesize(graphAdjListAndFP_file.c_str());
@@ -217,7 +211,12 @@ void bang_load(raft::device_resources handle, char* indexfile_path_prefix)
 	if (NULL == oInputData.pIndex)
 	{
 		printf("Error.. Malloc failed for Graph Index.\n");
-		return;
+		gpuErrchk(cudaFree(oInputData.d_compressedVectors));
+		gpuErrchk(cudaFree(&oInputData.d_pqTable));
+		gpuErrchk(cudaFree(&oInputData.d_chunksOffset));
+		gpuErrchk(cudaFree(&oInputData.d_centroid)); 
+		bRet = false;
+		goto cleanup;
 	}
 
 	log_message("Index Load Started");
@@ -228,10 +227,6 @@ void bang_load(raft::device_resources handle, char* indexfile_path_prefix)
 	// Sanity test start
 	// to see if the Index file was loaded properly
 	// Read the first and last neighbour
-	unsigned* puNeighbour = NULL; // Very first neighbour
-	unsigned* puNeighbour1 = NULL; // Very Last neighbour
-	unsigned *puNumNeighbours = NULL;
-	unsigned *puNumNeighbours1 = NULL;
 
 	// First neighbour calculation
 	puNumNeighbours = (unsigned*)(oInputData.pIndex+((oInputData.ullIndex_Entry_LEN*0)+ (sizeof(T)*oInputData.D) ));
@@ -251,7 +246,7 @@ void bang_load(raft::device_resources handle, char* indexfile_path_prefix)
 	cout << "BF Size : " << BF_ENTRIES << "\t"  << endl;
 
 
-
+cleanup:
 	free(pqTable);
 	pqTable = NULL;
 	free(pqTable_T);
@@ -260,11 +255,12 @@ void bang_load(raft::device_resources handle, char* indexfile_path_prefix)
 	chunksOffset = NULL;
 	free(centroid);
 	centroid = NULL;
+	return bRet;
 }
 
-template void bang_load<float>(char* );
-template void bang_load<uint8_t>(char* );
-template void bang_load<int8_t>(char* );
+template bool bang_load<float>(char* );
+template bool bang_load<uint8_t>(char* );
+template bool bang_load<int8_t>(char* );
 // ToDo: Add definitions for other dataset types e.g. int8_t for MSSPACEV dataset after testing
 
 void bang_load_c(char* pszPath)
@@ -285,58 +281,31 @@ void bang_alloc(int numQueries)
 
 
 	// Allocations on GPU
-	oGPUInst.d_queriesFP_ = raft::make_device_matrix<T>(handle, numQueries, D);
-	oGPUInst.d_queriesFP = oGPUInst.d_queriesFP_.data_handle();
-	oGPUInst.d_nearestNeighbours_ = raft::make_device_matrix<result_ann_t>(handle, numQueries, oSearchParams.recall);
-	oGPUInst.d_nearestNeighbours = oGPUInst.d_nearestNeighbours_.data_handle();
-	oGPUInst.d_pqDistTables_ = raft::make_device_matrix<float>(handle, 256*oInputData.uChunks, numQueries);
-	oGPUInst.d_pqDistTables = oGPUInst.d_pqDistTables_.data_handle();
-	oGPUInst.d_BestLSetsDist_ = raft::make_device_matrix<float>(handle, numQueries, oSearchParams.worklist_length);
-	oGPUInst.d_BestLSetsDist = oGPUInst.d_BestLSetsDist_.data_handle();
-	oGPUInst.d_BestLSets_count_ = raft::make_device_vector<uint32_t>(handle, numQueries);
-	oGPUInst.d_BestLSets_count = oGPUInst.d_BestLSets_count_.data_handle();
-	oGPUInst.d_BestLSets_visited_ = raft::make_device_matrix<bool>(handle, numQueries, (oSearchParams.worklist_length));
-	oGPUInst.d_BestLSets_visited = oGPUInst.d_BestLSets_visited_.data_handle();
-	oGPUInst.d_BestLSets_ = raft::make_device_matrix<unsigned>(handle, numQueries, (oSearchParams.worklist_length));
-	oGPUInst.d_BestLSets = oGPUInst.d_BestLSets_.data_handle();
-	oGPUInst.d_parents_ = raft::make_device_matrix<unsigned>(handle, numQueries, (unsigned));
-	oGPUInst.d_parents = oGPUInst.d_parents_.data_handle();
-	oGPUInst.d_neighbors_ = raft::make_device_matrix<unsigned>(handle, numQueries, (oInputData.R+1));
-	oGPUInst.d_neighbors = oGPUInst.d_neighbors_.data_handle();
-	oGPUInst.d_neighbors_temp_ = raft::make_device_matrix<unsigned>(handle, numQueries, (oInputData.R+1));
-	oGPUInst.d_neighbors_temp = oGPUInst.d_neighbors_temp_.data_handle();
-	oGPUInst.d_neighbors_aux_ = raft::make_device_matrix<unsigned>(handle, numQueries, (oInputData.R+1));
-	oGPUInst.d_neighbors_aux = oGPUInst.d_neighbors_aux_.data_handle();
-	oGPUInst.d_numNeighbors_query_ = raft::make_device_vector<unsigned>(handle, numQueries);
-	oGPUInst.d_numNeighbors_query = d_numNeighbors_query_.data_handle();
-	oGPUInst.d_numNeighbors_query_temp_ = raft::make_device_vector<unsigned>(handle, numQueries);
-	oGPUInst.d_numNeighbors_query_temp = oGPUInst.d_numNeighbors_query_temp_.data_handle();
-	oGPUInst.d_neighborsDist_query_ = raft::make_device_matrix<float>(handle, numQueries, (oInputData.R+1));
-	oGPUInst.d_neighborsDist_query = oGPUInst.d_neighborsDist_query_.data_handle();
-	oGPUInst.d_neighborsDist_query_aux_ = raft::make_device_matrix<float>(handle, numQueries, (oInputData.R+1));
-	oGPUInst.d_neighborsDist_query_aux = oGPUInst.d_neighborsDist_query_aux_.data_handle();
-	oGPUInst.d_numNeighbors_query_ = raft::make_device_vector<unsigned>(handle, numQueries);
-	oGPUInst.d_numNeighbors_query = oGPUInst.d_numNeighbors_query_.data_handle();
-	oGPUInst.d_processed_bit_vec_ = raft::make_device_matrix<bool>(handle, numQueries, BF_MEMORY);
-	oGPUInst.d_processed_bit_vec = oGPUInst.d_processed_bit_vec_.data_handle();
-	oGPUInst.d_nextIter_ = raft::make_device_scalar<bool>(handle, 0);
-	oGPUInst.d_nextIter = oGPUInst.d_nextIter_.data_handle();
-	oGPUInst.d_iter_ = raft::make_device_scalar<unsigned>(handle, 0);
-	oGPUInst.d_iter = oGPUInst.d_iter_.data_handle();
-	oGPUInst.d_mark_ = raft::make_device_vector<unsigned>(handle, numQueries); // ~40KB
-	oGPUInst.d_mark = oGPUInst.d_mark_.data_handle();
-	oGPUInst.d_FPSetCoordsList_Counts_ = raft::make_device_vector<unsigned>(handle, numQueries);
-	oGPUInst.d_FPSetCoordsList_Counts = oGPUInst.d_FPSetCoordsList_Counts_.data_handle();
-	oGPUInst.d_FPSetCoordsList_ = raft::make_device_matrix<T>(handle, uMAX_PARENTS_PERQUERY, numQueries); // Dim: [numIterations * numQueries]
-	oGPUInst.d_FPSetCoordsList = oGPUInst.d_FPSetCoordsList_.data_handle();
-	oGPUInst.d_L2distances_ = raft::make_device_vector<float>(handle, uMAX_PARENTS_PERQUERY, numQueries); // Dim: [numIterations * numQueries]
-	oGPUInst.d_L2distances =  oGPUInst.d_L2distances_.data_handle();
-	oGPUInst.d_L2ParentIds_ = raft::make_device_vector<unsigned>(handle, uMAX_PARENTS_PERQUERY, numQueries);
-	oGPUInst.d_L2ParentIds = oGPUInst.d_L2ParentIds_.data_handle();
-	oGPUInst.d_L2distances_aux_ = raft::make_device_matrix<float>(handle, uMAX_PARENTS_PERQUERY, numQueries);
-	oGPUInst.d_L2distances_aux = oGPUInst.d_L2distances_aux_.data_handle();
-	oGPUInst.d_L2ParentIds_aux_ = raft::make_device_vector<unsigned>(handle, uMAX_PARENTS_PERQUERY, numQueries); // Dim: [numIterations * numQueries]
-	oGPUInst.d_L2ParentIds_aux = oGPUInst.d_L2ParentIds_aux_.data_handle();
+	gpuErrchk(cudaMalloc(&oGPUInst.d_queriesFP, sizeof(T) * (numQueries*oInputData.D)));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_nearestNeighbours, (oSearchParams.recall * numQueries) * sizeof(result_ann_t) ));// Dim: [recall_at * numQueries]
+	gpuErrchk(cudaMalloc(&oGPUInst.d_pqDistTables, sizeof(float) * (256*oInputData.uChunks*numQueries)));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_BestLSetsDist, sizeof(float) * (numQueries*(oSearchParams.worklist_length))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_BestLSets_count, sizeof(unsigned) * (numQueries)));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_BestLSets_visited, sizeof(bool) * (numQueries* (oSearchParams.worklist_length))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_BestLSets, sizeof(unsigned) * (numQueries* (oSearchParams.worklist_length))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_parents, sizeof(unsigned) * (numQueries*(SIZEPARENTLIST))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_neighbors, sizeof(unsigned) * (numQueries*(oInputData.R+1))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_neighbors_temp, sizeof(unsigned) * (numQueries*(oInputData.R+1))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_neighbors_aux, sizeof(unsigned) * (numQueries*(oInputData.R+1))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_numNeighbors_query, sizeof(unsigned) * (numQueries)));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_numNeighbors_query_temp, sizeof(unsigned) * (numQueries)));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_neighborsDist_query, sizeof(float) * (numQueries*(oInputData.R+1))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_neighborsDist_query_aux, sizeof(float) * (numQueries*(oInputData.R+1))));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_processed_bit_vec, sizeof(bool)*BF_MEMORY*numQueries));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_nextIter, sizeof(bool)));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_iter, sizeof(unsigned)));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_mark, sizeof(unsigned) * (numQueries)));			// ~40KB
+	gpuErrchk(cudaMalloc(&oGPUInst.d_FPSetCoordsList_Counts, numQueries * sizeof(unsigned) ));
+	gpuErrchk(cudaMalloc(&oGPUInst.d_FPSetCoordsList, (uMAX_PARENTS_PERQUERY * numQueries) * oHostInst.FPSetCoords_size_bytes )); // Dim: [numIterations * numQueries]
+	gpuErrchk(cudaMalloc(&oGPUInst.d_L2distances, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(float) )); // Dim: [numIterations * numQueries]
+	gpuErrchk(cudaMalloc(&oGPUInst.d_L2ParentIds, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(unsigned) )); // Dim: [numIterations * numQueries]
+	gpuErrchk(cudaMalloc(&oGPUInst.d_L2distances_aux, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(float) )); // Dim: [numIterations * numQueries]
+	gpuErrchk(cudaMalloc(&oGPUInst.d_L2ParentIds_aux, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(unsigned) )); // Dim: [numIterations * numQueries]
 
 	// Default stream computations or transfers cannot be overalapped with operations on other streams
 	// Hence creating separate streams for transfers and computations to achieve overlap
@@ -350,18 +319,13 @@ void bang_alloc(int numQueries)
 	oHostInst.numCPUthreads = 64;//64 // ToDo: get this dynamically from the platform
 
 	// Host Memory Allocation
-	oHostInst.neighbors_ = raft::make_pinned_matrix<unsigned>(handle, numQueries, (oInputData.R+1));
-	oHostInst.neighbors = oHostInst.neighbors_.data_handle();
+	gpuErrchk(cudaMallocHost(&oHostInst.neighbors, sizeof(unsigned) * (numQueries*(oInputData.R+1))) );
 	// Note : R+1 is needed because MEDOID is added as additional neighbour in very first neighbour fetching (iteration)
-	oHostInst.numNeighbors_query_ = raft::make_pinned_vector<unsigned>(handle, numQueries);
-	oHostInst.numNeighbors_query = oHostInst.numNeighbors_query_.data_handle();
-	oHostInst.parents_ = raft::make_pinned_matrix<unsigned>(handle, numQueries, (SIZEPARENTLIST));
-	oHostInst.parents = oHostInst.parents_.data_handle();
+	gpuErrchk(cudaMallocHost(&oHostInst.numNeighbors_query,sizeof(unsigned) * (numQueries) ));
+	gpuErrchk(cudaMallocHost(&oHostInst.parents,sizeof(unsigned) * numQueries * (SIZEPARENTLIST)));
 	//oHostInst.L2ParentIds = (unsigned*)malloc(sizeof(unsigned) * numQueries);
 	//oHostInst.FPSetCoordsList_Counts = (unsigned*)malloc(sizeof(unsigned) * numQueries);
-	oHostInst.FPSetCoordsList_ = raft::make_pinned_matrix();
 	gpuErrchk(cudaMallocHost(&oHostInst.FPSetCoordsList, (uMAX_PARENTS_PERQUERY * numQueries) * oHostInst.FPSetCoords_size_bytes));
-	oHostInst.FPSetCoordsList_ = raft::make_pinned_vector<T>(handle, uMAX_PARENTS_PERQUERY * numQueries * FPSetCoords_size_bytes);
 }
 template void bang_alloc<float>(int  );
 template void bang_alloc<uint8_t>(int  );
@@ -371,7 +335,7 @@ template void bang_alloc<int8_t>(int  );
 // Note:To be called after setSearchparams
 // Set-up params and pre-compute as much we can before the actural query processing can begin
 template<typename T>
-void bang_init(raft::device_resources handle, int numQueries)
+void bang_init(int numQueries)
 {
 
 	// Initialize GPU related attributes
@@ -383,14 +347,14 @@ void bang_init(raft::device_resources handle, int numQueries)
 	oGPUInst.numThreads_K5 =256;// neighbor_filtering_new
 	oGPUInst.numThreads_K3_merge = 2*oSearchParams.worklist_length;
 	assert(oGPUInst.numThreads_K3_merge <= 1024);	// Max thread block size
-	gpuErrchk(cudaMemsetAsync(oGPUInst.d_iter,0,sizeof(unsigned), handle.get_stream()));
+	gpuErrchk(cudaMemset(oGPUInst.d_iter,0,sizeof(unsigned)));
 
-	gpuErrchk(cudaMemsetAsync(oGPUInst.d_pqDistTables,0,sizeof(float) * (oInputData.uChunks * 256 * numQueries), handle.get_stream()));
-	gpuErrchk(cudaMemsetAsync(oGPUInst.d_processed_bit_vec, 0, sizeof(bool)*BF_MEMORY*numQueries, handle.get_stream()));
-	gpuErrchk(cudaMemsetAsync(oGPUInst.d_parents, 0, sizeof(unsigned)*(numQueries*(SIZEPARENTLIST)), handle.get_stream()));
-	gpuErrchk(cudaMemsetAsync(oGPUInst.d_BestLSets_count, 0, sizeof(unsigned)*(numQueries), handle.get_stream()));
-	gpuErrchk(cudaMemsetAsync(oGPUInst.d_mark, 1, sizeof(unsigned)*(numQueries), handle.get_stream())); // ToDo, should be 0?
-	gpuErrchk(cudaMemsetAsync(oGPUInst.d_neighborsDist_query,0,sizeof(float) * (numQueries*(oInputData.R+1)), handle.get_stream()));
+	gpuErrchk(cudaMemset(oGPUInst.d_pqDistTables,0,sizeof(float) * (oInputData.uChunks * 256 * numQueries)));
+	gpuErrchk(cudaMemset(oGPUInst.d_processed_bit_vec, 0, sizeof(bool)*BF_MEMORY*numQueries));
+	gpuErrchk(cudaMemset(oGPUInst.d_parents, 0, sizeof(unsigned)*(numQueries*(SIZEPARENTLIST))));
+	gpuErrchk(cudaMemset(oGPUInst.d_BestLSets_count, 0, sizeof(unsigned)*(numQueries)));
+	gpuErrchk(cudaMemset(oGPUInst.d_mark, 1, sizeof(unsigned)*(numQueries))); // ToDo, should be 0?
+	gpuErrchk(cudaMemset(oGPUInst.d_neighborsDist_query,0,sizeof(float) * (numQueries*(oInputData.R+1))));
 
 	// As we know the Medoid is the first parent, lets get started with working extracting its neighbours
 	T* FPSetCoordsList = (T*)oHostInst.FPSetCoordsList;
@@ -404,8 +368,8 @@ void bang_init(raft::device_resources handle, int numQueries)
 		FPSetCoordsList_Counts[i] = 1;
 	}
 	// Transfer the Medoid (seed parent) default first parent
-	gpuErrchk(cudaMemcpyAsync(oGPUInst.d_L2ParentIds, L2ParentIds, sizeof(unsigned) * numQueries, cudaMemcpyHostToDevice, handle.get_stream() ));
-	gpuErrchk(cudaMemcpyAsync(oGPUInst.d_FPSetCoordsList_Counts, FPSetCoordsList_Counts, sizeof(unsigned) * numQueries, cudaMemcpyHostToDevice, handle.get_stream() ));
+	gpuErrchk(cudaMemcpy(oGPUInst.d_L2ParentIds, L2ParentIds, sizeof(unsigned) * numQueries, cudaMemcpyHostToDevice ));
+	gpuErrchk(cudaMemcpy(oGPUInst.d_FPSetCoordsList_Counts, FPSetCoordsList_Counts, sizeof(unsigned) * numQueries, cudaMemcpyHostToDevice ));
 	free(L2ParentIds);
 	free(FPSetCoordsList_Counts);
 
@@ -441,15 +405,15 @@ void bang_init(raft::device_resources handle, int numQueries)
 	}
 
 	// 0th row in FPSetCoordsListget copied to GPU in Async fashion
-	cudaMemcpyAsync(d_FPSetCoordsList + ((iter-1) * oHostInst.FPSetCoords_rowsize),
+	cudaMemcpy(d_FPSetCoordsList + ((iter-1) * oHostInst.FPSetCoords_rowsize),
 					FPSetCoordsList + ((iter-1)* oHostInst.FPSetCoords_rowsize),
 					oHostInst.FPSetCoords_rowsize_bytes,
-					cudaMemcpyHostToDevice, handle.get_stream());
+					cudaMemcpyHostToDevice);
 
 
 	// Transfer neighbor IDs and count to GPU
-	gpuErrchk(cudaMemcpyAsync(oGPUInst.d_neighbors_temp, oHostInst.neighbors, sizeof(unsigned) * numQueries*(oInputData.R+1), cudaMemcpyHostToDevice, handle.get_stream()));
-	gpuErrchk(cudaMemcpyAsync(oGPUInst.d_numNeighbors_query_temp, oHostInst.numNeighbors_query, sizeof(unsigned) * (numQueries), cudaMemcpyHostToDevice, handle.get_stream()));
+	gpuErrchk(cudaMemcpy(oGPUInst.d_neighbors_temp, oHostInst.neighbors, sizeof(unsigned) * numQueries*(oInputData.R+1), cudaMemcpyHostToDevice));
+	gpuErrchk(cudaMemcpy(oGPUInst.d_numNeighbors_query_temp, oHostInst.numNeighbors_query, sizeof(unsigned) * (numQueries), cudaMemcpyHostToDevice));
 }
 template void bang_init<float>(int  );
 template void bang_init<uint8_t>(int  );
@@ -523,7 +487,7 @@ void bang_set_searchparams_c(int recall, int worklist_length, DistFunc nDistFunc
 }
 
 template<typename T>
-void bang_query(raft::device_resources handle, T* queriesFP, int numQueries,
+void bang_query(T* queriesFP, int numQueries,
 					result_ann_t* nearestNeighbours,
 					float* nearestNeighbours_dist )
 {
@@ -565,7 +529,7 @@ void bang_query(raft::device_resources handle, T* queriesFP, int numQueries,
 	auto start = std::chrono::high_resolution_clock::now();
 	#endif
 	// ToDo: Check the Dim of queriesFP == oInputData.D, for mips, Dimentionality of queriesFP +1 = oInputData.D
-	gpuErrchk(cudaMemcpyAsync(d_queriesFP, queriesFP, sizeof(T) * (oInputData.D*numQueries), cudaMemcpyHostToDevice, handle.get_stream()));
+	gpuErrchk(cudaMemcpy(d_queriesFP, queriesFP, sizeof(T) * (oInputData.D*numQueries), cudaMemcpyHostToDevice));
 
 #ifdef _TIMERS
 	auto stop = std::chrono::high_resolution_clock::now();
@@ -591,7 +555,7 @@ void bang_query(raft::device_resources handle, T* queriesFP, int numQueries,
 	start = std::chrono::high_resolution_clock::now();
 #endif
 
-	gpuErrchk(cudaMemsetAsync(oGPUInst.d_numNeighbors_query, 0, sizeof(unsigned)*numQueries, handle.get_stream()));
+	gpuErrchk(cudaMemset(oGPUInst.d_numNeighbors_query, 0, sizeof(unsigned)*numQueries));
 
 #ifdef _TIMERS
 	stop = std::chrono::high_resolution_clock::now();
