@@ -72,7 +72,8 @@ void bang_set_searchparams(int recall,
     * @param[in] num_queries Number of queries to be used for the search.
     * @param[in] recal_param k-recall@k.
     */
-    void bang_query(raft::device_resources handle, T* query_array, 
+    void bang_query(raft::device_resources handle,
+                    T* query_array,
                     int num_queries,
                     result_ann_t* nearestNeighbours,
 					float* nearestNeighbours_dist );
@@ -96,5 +97,8 @@ extern "C" void bang_query_c(uint8_t* query_array,
                     int num_queries,
                     result_ann_t* nearestNeighbours,
 					float* nearestNeighbours_dist );
+
+extern "C" void bang_unload_c( );
+#endif
 
 #endif //BANG_H_
