@@ -401,7 +401,7 @@ void BANGSearchInner<T>::bang_alloc(int numQueries)
 	gpuErrchk(cudaStreamCreate(&m_objGPUInst.streamFPTransfers));
 	gpuErrchk(cudaStreamCreate(&m_objGPUInst.streamParent));
 	gpuErrchk(cudaStreamCreate(&m_objGPUInst.streamChildren));
-	gpuErrchk(cudaStreamCreate(&m_objGPUInst.streamKernels));
+	m_objGPUInst.streamKernels = handle.get_stream();
 
 	// Host size params
 	m_objHostInst.numCPUthreads = 64;//64 // ToDo: get this dynamically from the platform
@@ -536,7 +536,7 @@ void BANGSearchInner<T>::bang_free()
 
 
 	cudaStreamDestroy(m_objGPUInst.streamFPTransfers);
-	cudaStreamDestroy(m_objGPUInst.streamKernels);
+	// cudaStreamDestroy(m_objGPUInst.streamKernels);
 	cudaStreamDestroy(m_objGPUInst.streamParent);
 	cudaStreamDestroy(m_objGPUInst.streamChildren);
 
@@ -634,7 +634,7 @@ void BANGSearchInner<T>::bang_query(raft::device_resources handle, T* queriesFP,
 	start = std::chrono::high_resolution_clock::now();
 #endif
 
-	gpuErrchk(cudaMemsetAsync(m_objGPUInst.d_numNeighbors_query, 0, sizeof(unsigned)*numQueries));
+	gpuErrchk(cudaMemsetAsync(m_objGPUInst.d_numNeighbors_query, 0, sizeof(unsigned)*numQueries, m_objGPUInst.streamKernels));
 
 #ifdef _TIMERS
 	stop = std::chrono::high_resolution_clock::now();
@@ -963,9 +963,9 @@ void BANGSearchInner<T>::bang_query(raft::device_resources handle, T* queriesFP,
 #endif
 	// Lets ensure we have received all the FP vectors before starting the Re-ranking.
 	// We need FP vectors to calculate exact distances now. Compressed vectors are not used hereafter
-	cudaStreamSynchronize(m_objGPUInst.streamFPTransfers);
+	// cudaStreamSynchronize(m_objGPUInst.streamFPTransfers);
 
-	compute_L2Dist<<<numQueries, m_objGPUInst.K4_blockSize, m_objInputData.D * sizeof(T) >>> (d_FPSetCoordsList,
+	compute_L2Dist<<<numQueries, m_objGPUInst.K4_blockSize, m_objInputData.D * sizeof(T), 0, m_objGPUInst.streamFPTransfers>>> (d_FPSetCoordsList,
 												m_objGPUInst.d_FPSetCoordsList_Counts,
 												d_queriesFP,
 												m_objGPUInst.d_L2ParentIds,
@@ -976,7 +976,7 @@ void BANGSearchInner<T>::bang_query(raft::device_resources handle, T* queriesFP,
 
 
 	// We have the exact distances of each each candidate. Lets pick the topk neighbours.
-	compute_NearestNeighbours<<<numQueries, MAX_PARENTS_PERQUERY >>> (m_objGPUInst.d_L2ParentIds,
+	compute_NearestNeighbours<<<numQueries, MAX_PARENTS_PERQUERY, 0, m_objGPUInst.streamFPTransfers >>> (m_objGPUInst.d_L2ParentIds,
 												m_objGPUInst.d_L2ParentIds_aux,
 												m_objGPUInst.d_FPSetCoordsList_Counts,
 												m_objGPUInst.d_L2distances,
