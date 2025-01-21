@@ -1,6 +1,7 @@
 # Minimum required version of CMake
 cmake_minimum_required(VERSION 3.24)
 
+set(CMAKE_ROOT /raid/tarangj/miniconda3/envs/bang/share/cmake-3.26)
 set(CMAKE_STANDARD 17)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -46,8 +47,8 @@ set_target_properties(bang PROPERTIES
 
 # Specify the test driver executable
 target_link_libraries(bang raft::raft)
-add_executable(bang_search test_driver.cpp)
-target_link_libraries(bang_search PRIVATE bang dl)
+#add_executable(bang_search test_driver.cpp)
+#target_link_libraries(bang_search PRIVATE bang dl)
 
 # Clean rule (optional, CMake handles this with 'make clean')
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY CLEAN_DIRECTORIES "bang.so;bang_search")

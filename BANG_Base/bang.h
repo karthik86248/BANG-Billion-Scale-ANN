@@ -38,9 +38,10 @@ template<typename T>
 class BANGSearch
 {
     void* m_pImpl;
+    raft::device_resources handle_;
 
     public:
-    BANGSearch();
+    BANGSearch(raft:;device_resources handle);
     virtual ~BANGSearch();
 
     /*! @brief Load the graph index, compressed vectors etc into CPU/GPU memory.

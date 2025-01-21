@@ -22,6 +22,13 @@ limitations under the License.
 #include <fstream>
 #include <sstream>
 
+#include <raft/core/device_mdarray.hpp>
+#include <raft/core/device_mdspan.hpp>
+#include <raft/core/device_resources.hpp>
+#include <raft/core/host_mdarray.hpp>
+#include <raft/core/host_mdspan.hpp>
+#include <raft/core/pinned_mdarray.hpp>
+#include <raft/core/resource/cuda_stream_pool.hpp>
 
 #define ROUND_UP(X, Y) \
 	((((uint64_t)(X) / (Y)) + ((uint64_t)(X) % (Y) != 0)) * (Y))
@@ -88,22 +95,39 @@ typedef struct _GPUInstance
 	// Device Memory
 	void *d_queriesFP ; // Input
 	result_ann_t *d_nearestNeighbours = NULL; // The final output of ANNs
+	raft::device_matrix<float, uint32_t, raft::row_major> d_pqDistTables_;
 	float *d_pqDistTables;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_BestLSetsDist_;
 	float *d_BestLSetsDist;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_BestLSets_count_;
 	unsigned *d_BestLSets_count ;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_BestLSets_;
 	unsigned *d_BestLSets ;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_BestLSets_visited_;
 	bool *d_BestLSets_visited ;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_parents_;
 	unsigned *d_parents ;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_neighborsDist_query_;
 	float *d_neighborsDist_query ;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_neighborsDist_query_aux_;
 	float *d_neighborsDist_query_aux ;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_neighbors_;
 	unsigned *d_neighbors ;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_neighbors_aux_;
 	unsigned *d_neighbors_aux ;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_numNeighbors_query_;
 	unsigned *d_numNeighbors_query ;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_neighbors_temp_;
 	unsigned *d_neighbors_temp ;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_numNeighbors_query_temp_;
 	unsigned *d_numNeighbors_query_temp ;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_iter_;
 	unsigned *d_iter ;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_mark_;
 	unsigned *d_mark ;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_nextIter_;
 	bool *d_nextIter ;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_processed_bit_vec_;
 	bool *d_processed_bit_vec ;
 
 	// The FP vectors corresponding to each candidate is fetched asynchronously for all the queries in the iteration.
@@ -120,10 +144,15 @@ typedef struct _GPUInstance
 	// Dimensoins of 2D array : [numIterations * numQueries]
 	// numIterations upper bound is MAX_PARENTS_PERQUERY
 	void* d_FPSetCoordsList;
+	raft::device_matrix<uint32_t, uint32_t, raft::row_major> d_FPSetCoordsList_Counts_;
 	unsigned* d_FPSetCoordsList_Counts;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_L2distances_;
 	float* d_L2distances ; // M x N dimensions
+	raft::device_matrix<uint32_t, uint32_t, raft::row_major> d_L2ParentIds_;
 	unsigned* d_L2ParentIds ; // // M x N dimensions
+	raft::device_matrix<float, uint32_t, raft::row_major> d_L2distances_aux_;
 	float* d_L2distances_aux ; // M x N dimensions
+	raft::device_matrix<uint32_t, uint32_t, raft::row_major> d_L2ParentIds_aux_;
 	unsigned* d_L2ParentIds_aux ; // // M x N dimensions
 
 	//  Specific Streams for
@@ -348,17 +377,17 @@ class BANGSearchInner
 
 public:
     
-    bool bang_load( char* indexfile_path_prefix);
+    bool bang_load(raft::device_resources handle, char* indexfile_path_prefix);
 
-    void bang_alloc(int numQueries);
+    void bang_alloc(raft::device_resources handle, int numQueries);
     
-    void bang_init(int numQueries);
+    void bang_init(raft::device_resources handle, int numQueries);
 
-    void bang_set_searchparams(int recall, 
+    void bang_set_searchparams(raft::device_resources handle, int recall, 
                             int worklist_length,
                             DistFunc nDistFunc=ENUM_DIST_L2);
     
-    void bang_query(T* query_array, 
+    void bang_query(raft::device_resources handle, T* query_array, 
                     int num_queries, 
                     result_ann_t* nearestNeighbours,
 					float* nearestNeighbours_dist );

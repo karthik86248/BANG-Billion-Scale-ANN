@@ -66,7 +66,7 @@ using namespace std;
 using Clock = std::chrono::high_resolution_clock;
 
 template <typename T>
-BANGSearch<T>::BANGSearch()
+BANGSearch<T>::BANGSearch(raft::device_resources handle) : handle_(handle)
 {
 	m_pImpl = new BANGSearchInner<int>();
 }
@@ -79,24 +79,24 @@ BANGSearch<T>::~BANGSearch()
 }
 
 template<typename T>
-bool BANGSearch<T>::bang_load( char* indexfile_path_prefix)
+bool BANGSearch<T>::bang_load(char* indexfile_path_prefix)
 {
 	BANGSearchInner<T>* pobjBangInner = static_cast<BANGSearchInner<T>*>(m_pImpl);
-	return pobjBangInner->bang_load(indexfile_path_prefix);
+	return pobjBangInner->bang_load(handle_, indexfile_path_prefix);
 }
 
 template<typename T>
 void BANGSearch<T>::bang_alloc(int numQueries)
 {
 	BANGSearchInner<T>* pobjBangInner = static_cast<BANGSearchInner<T>*>(m_pImpl);
-	pobjBangInner->bang_alloc(numQueries);
+	pobjBangInner->bang_alloc(handle_, numQueries);
 }
 
 template<typename T>
 void BANGSearch<T>::bang_init(int numQueries)
 {
 	BANGSearchInner<T>* pobjBangInner = static_cast<BANGSearchInner<T>*>(m_pImpl);
-	pobjBangInner->bang_init(numQueries);
+	pobjBangInner->bang_init(handle_, numQueries);
 }
 
 template<typename T>
@@ -105,7 +105,7 @@ void BANGSearch<T>::bang_set_searchparams(int recall,
                             DistFunc nDistFunc)
 {
 	BANGSearchInner<T>* pobjBangInner = static_cast<BANGSearchInner<T>*>(m_pImpl);
-	return pobjBangInner->bang_set_searchparams(recall, worklist_length, nDistFunc);
+	return pobjBangInner->bang_set_searchparams(handle_, recall, worklist_length, nDistFunc);
 }
 
 template<typename T>
@@ -115,7 +115,7 @@ void BANGSearch<T>::bang_query(T* query_array,
 					float* nearestNeighbours_dist )
 {
 	BANGSearchInner<T>* pobjBangInner = static_cast<BANGSearchInner<T>*>(m_pImpl);
-	pobjBangInner->bang_query(query_array, num_queries, nearestNeighbours, nearestNeighbours_dist);
+	pobjBangInner->bang_query(handle_, query_array, num_queries, nearestNeighbours, nearestNeighbours_dist);
 }
 
 template<typename T>
@@ -134,7 +134,7 @@ void BANGSearch<T>::bang_unload()
 
 
 template<typename T>
-bool BANGSearchInner<T>::bang_load(char* indexfile_path_prefix)
+bool BANGSearchInner<T>::bang_load(raft::device_resources handle, char* indexfile_path_prefix)
 {
 	string diskann_Generatedfiles_path = string(indexfile_path_prefix);
 	string pqTable_file = diskann_Generatedfiles_path +  PQ_PIVOTS_FILE_SUFFIX;//string(argv[1]); // Pivot files
@@ -263,15 +263,19 @@ bool BANGSearchInner<T>::bang_load(char* indexfile_path_prefix)
 	cout << "Finished reading bin file." << endl;
 	// To reduce Peak Host memory usage, loading compressed vectors to CPU and transferring to GPU and releasing host memory
 	printf("Transferring Compressed Vectors to GPU ...\n");
-	m_objInputData.d_compressedVectors = raft::make_device_matrix<uint8_t, uint32_t>(handle, N, uChunks); 	//100M*100 ~10GB
+	m_objInputData.d_compressedVectors_ = raft::make_device_matrix<uint8_t, uint32_t>(handle, N, uChunks); 	//100M*100 ~10GB
+	m_objInputData.d_compressedVectors = m_objInputData.d_compressedVectors_.data_handle();
 	gpuErrchk(cudaMemcpyAsync(m_objInputData.d_compressedVectors, compressedVectors, (unsigned long long)(sizeof(uint8_t) * (unsigned long long)(uChunks)*N),
 	cudaMemcpyHostToDevice, handle.get_stream()));
 	free(compressedVectors);
 	compressedVectors = NULL;
 
-	m_objInputData.d_pqTable = raft::make_device_matrix<float>(handle, 256, m_objInputData.D);
-	m_objInputData.d_chunksOffset = raft::make_device_vector<uint32_t>(handle, m_objInputData.uChunks+1);
-	m_objInputData.d_centroid = raft::make_device_vector<float>(handle, m_objInputData.D);
+	m_objInputData.d_pqTable_ = raft::make_device_matrix<float>(handle, 256, m_objInputData.D);
+	m_objInputData.d_pqTable = m_objInputData.d_pqTable_.data_handle();
+	m_objInputData.d_chunksOffset_ = raft::make_device_vector<uint32_t>(handle, m_objInputData.uChunks+1);
+	m_objInputData.d_chunksOffset = m_objInputData.d_chunksOffset_.data_handle();
+	m_objInputData.d_centroid_ = raft::make_device_vector<float>(handle, m_objInputData.D);
+	m_objInputData.d_centroid = m_objInputData.d_centroid_.data_handle();
 
 	// host to device transfer
 	gpuErrchk(cudaMemcpyAsync(m_objInputData.d_pqTable, pqTable_T, sizeof(float) * (256*m_objInputData.D), cudaMemcpyHostToDevice, handle.get_stream()));
@@ -330,7 +334,7 @@ cleanup:
 
 
 template<typename T>
-void BANGSearchInner<T>::bang_alloc(int numQueries)
+void BANGSearchInner<T>::bang_alloc(raft::device_resources handle, int numQueries)
 {
 	// Assignments needed for determining allocation sizes
 	const unsigned uMAX_PARENTS_PERQUERY = (m_objSearchParams.worklist_length + NAX_EXTRA_ITERATION) ;
@@ -558,7 +562,7 @@ void BANGSearchInner<T>::bang_unload()
 }
 
 template<typename T>
-void BANGSearchInner<T>::bang_set_searchparams(int recall, int worklist_length, DistFunc nDistFunc)
+void BANGSearchInner<T>::bang_set_searchparams(raft::device_resources handle, int recall, int worklist_length, DistFunc nDistFunc)
 {
 	m_objSearchParams.recall = recall;
 	m_objSearchParams.worklist_length = worklist_length;
@@ -608,7 +612,7 @@ void BANGSearchInner<T>::bang_query(raft::device_resources handle, T* queriesFP,
 	auto start = std::chrono::high_resolution_clock::now();
 	#endif
 	// ToDo: Check the Dim of queriesFP == m_objInputData.D, for mips, Dimentionality of queriesFP +1 = m_objInputData.D
-	gpuErrchk(cudaMemcpyAsync(d_queriesFP, queriesFP, sizeof(T) * (m_objInputData.D*numQueries), cudaMemcpyHostToDevice), handle.get_stream());
+	gpuErrchk(cudaMemcpyAsync(d_queriesFP, queriesFP, sizeof(T) * (m_objInputData.D*numQueries), cudaMemcpyHostToDevice, handle.get_stream()));
 
 #ifdef _TIMERS
 	auto stop = std::chrono::high_resolution_clock::now();
