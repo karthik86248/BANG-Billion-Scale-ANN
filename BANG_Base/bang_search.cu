@@ -89,7 +89,7 @@ template<typename T>
 void BANGSearch<T>::bang_alloc(int numQueries)
 {
 	BANGSearchInner<T>* pobjBangInner = static_cast<BANGSearchInner<T>*>(m_pImpl);
-	pobjBangInner->bang_alloc(handle_, numQueries);
+	pobjBangInner->bang_alloc(handle_, uint32_t(numQueries));
 }
 
 template<typename T>
@@ -270,7 +270,7 @@ bool BANGSearchInner<T>::bang_load(raft::device_resources handle, char* indexfil
 	free(compressedVectors);
 	compressedVectors = NULL;
 
-	m_objInputData.d_pqTable_ = raft::make_device_matrix<float>(handle, 256, m_objInputData.D);
+	m_objInputData.d_pqTable_ = raft::make_device_matrix<float>(handle, uint32_t(256), m_objInputData.D);
 	m_objInputData.d_pqTable = m_objInputData.d_pqTable_.data_handle();
 	m_objInputData.d_chunksOffset_ = raft::make_device_vector<uint32_t>(handle, m_objInputData.uChunks+1);
 	m_objInputData.d_chunksOffset = m_objInputData.d_chunksOffset_.data_handle();
@@ -334,7 +334,7 @@ cleanup:
 
 
 template<typename T>
-void BANGSearchInner<T>::bang_alloc(raft::device_resources handle, int numQueries)
+void BANGSearchInner<T>::bang_alloc(raft::device_resources handle, uint32_t numQueries)
 {
 	// Assignments needed for determining allocation sizes
 	const unsigned uMAX_PARENTS_PERQUERY = (m_objSearchParams.worklist_length + NAX_EXTRA_ITERATION) ;
@@ -345,21 +345,21 @@ void BANGSearchInner<T>::bang_alloc(raft::device_resources handle, int numQuerie
 
 
 	// Allocations on GPU
-	m_objGPUInst.d_queriesFP_ = raft::make_device_matrix<T>(handle, numQueries, D);
+	m_objGPUInst.d_queriesFP_ = raft::make_device_matrix<T>(handle, numQueries, m_objInputData.D);
 	m_objGPUInst.d_queriesFP = m_objGPUInst.d_queriesFP_.data_handle();
-	m_objGPUInst.d_nearestNeighbours_ = raft::make_device_matrix<result_ann_t>(handle, numQueries, m_objSearchParams.recall);
+	m_objGPUInst.d_nearestNeighbours_ = raft::make_device_matrix<result_ann_t>(handle, numQueries, uint32_t(m_objSearchParams.recall));
 	m_objGPUInst.d_nearestNeighbours = m_objGPUInst.d_nearestNeighbours_.data_handle();
-	m_objGPUInst.d_pqDistTables_ = raft::make_device_matrix<float>(handle, 256*m_objInputData.uChunks, numQueries);
+	m_objGPUInst.d_pqDistTables_ = raft::make_device_matrix<float>(handle, 256*m_objInputData.uChunks, uint32_t(numQueries));
 	m_objGPUInst.d_pqDistTables = m_objGPUInst.d_pqDistTables_.data_handle();
-	m_objGPUInst.d_BestLSetsDist_ = raft::make_device_matrix<float>(handle, numQueries, m_objSearchParams.worklist_length);
+	m_objGPUInst.d_BestLSetsDist_ = raft::make_device_matrix<float>(handle, numQueries, uint32_t(m_objSearchParams.worklist_length));
 	m_objGPUInst.d_BestLSetsDist = m_objGPUInst.d_BestLSetsDist_.data_handle();
 	m_objGPUInst.d_BestLSets_count_ = raft::make_device_vector<uint32_t>(handle, numQueries);
 	m_objGPUInst.d_BestLSets_count = m_objGPUInst.d_BestLSets_count_.data_handle();
-	m_objGPUInst.d_BestLSets_visited_ = raft::make_device_matrix<bool>(handle, numQueries, (m_objSearchParams.worklist_length));
+	m_objGPUInst.d_BestLSets_visited_ = raft::make_device_matrix<bool>(handle, numQueries, uint32_t(m_objSearchParams.worklist_length));
 	m_objGPUInst.d_BestLSets_visited = m_objGPUInst.d_BestLSets_visited_.data_handle();
-	m_objGPUInst.d_BestLSets_ = raft::make_device_matrix<unsigned>(handle, numQueries, (m_objSearchParams.worklist_length));
+	m_objGPUInst.d_BestLSets_ = raft::make_device_matrix<unsigned>(handle, numQueries, uint32_t(m_objSearchParams.worklist_length));
 	m_objGPUInst.d_BestLSets = m_objGPUInst.d_BestLSets_.data_handle();
-	m_objGPUInst.d_parents_ = raft::make_device_matrix<unsigned>(handle, numQueries, (unsigned));
+	m_objGPUInst.d_parents_ = raft::make_device_matrix<unsigned>(handle, numQueries, uint32_t(SIZEPARENTLIST));
 	m_objGPUInst.d_parents = m_objGPUInst.d_parents_.data_handle();
 	m_objGPUInst.d_neighbors_ = raft::make_device_matrix<unsigned>(handle, numQueries, (m_objInputData.R+1));
 	m_objGPUInst.d_neighbors = m_objGPUInst.d_neighbors_.data_handle();
@@ -368,7 +368,7 @@ void BANGSearchInner<T>::bang_alloc(raft::device_resources handle, int numQuerie
 	m_objGPUInst.d_neighbors_aux_ = raft::make_device_matrix<unsigned>(handle, numQueries, (m_objInputData.R+1));
 	m_objGPUInst.d_neighbors_aux = m_objGPUInst.d_neighbors_aux_.data_handle();
 	m_objGPUInst.d_numNeighbors_query_ = raft::make_device_vector<unsigned>(handle, numQueries);
-	m_objGPUInst.d_numNeighbors_query = d_numNeighbors_query_.data_handle();
+	m_objGPUInst.d_numNeighbors_query = m_objGPUInst.d_numNeighbors_query_.data_handle();
 	m_objGPUInst.d_numNeighbors_query_temp_ = raft::make_device_vector<unsigned>(handle, numQueries);
 	m_objGPUInst.d_numNeighbors_query_temp = m_objGPUInst.d_numNeighbors_query_temp_.data_handle();
 	m_objGPUInst.d_neighborsDist_query_ = raft::make_device_matrix<float>(handle, numQueries, (m_objInputData.R+1));
@@ -389,14 +389,13 @@ void BANGSearchInner<T>::bang_alloc(raft::device_resources handle, int numQuerie
 	m_objGPUInst.d_FPSetCoordsList_Counts = m_objGPUInst.d_FPSetCoordsList_Counts_.data_handle();
 	m_objGPUInst.d_FPSetCoordsList_ = raft::make_device_matrix<T>(handle, uMAX_PARENTS_PERQUERY * numQueries, m_objHostInst.FPSetCoords_size); // Dim: [numIterations * numQueries]
 	m_objGPUInst.d_FPSetCoordsList = m_objGPUInst.d_FPSetCoordsList_.data_handle();
-	m_objHostInst.FPSetCoords_size_bytes
-	m_objGPUInst.d_L2distances_ = raft::make_device_vector<float>(handle, uMAX_PARENTS_PERQUERY, numQueries); // Dim: [numIterations * numQueries]
+	m_objGPUInst.d_L2distances_ = raft::make_device_matrix<float>(handle, uMAX_PARENTS_PERQUERY, numQueries); // Dim: [numIterations * numQueries]
 	m_objGPUInst.d_L2distances =  m_objGPUInst.d_L2distances_.data_handle();
-	m_objGPUInst.d_L2ParentIds_ = raft::make_device_vector<unsigned>(handle, uMAX_PARENTS_PERQUERY, numQueries);
+	m_objGPUInst.d_L2ParentIds_ = raft::make_device_matrix<unsigned>(handle, uMAX_PARENTS_PERQUERY, numQueries);
 	m_objGPUInst.d_L2ParentIds = m_objGPUInst.d_L2ParentIds_.data_handle();
 	m_objGPUInst.d_L2distances_aux_ = raft::make_device_matrix<float>(handle, uMAX_PARENTS_PERQUERY, numQueries);
 	m_objGPUInst.d_L2distances_aux = m_objGPUInst.d_L2distances_aux_.data_handle();
-	m_objGPUInst.d_L2ParentIds_aux_ = raft::make_device_vector<unsigned>(handle, uMAX_PARENTS_PERQUERY, numQueries); // Dim: [numIterations * numQueries]
+	m_objGPUInst.d_L2ParentIds_aux_ = raft::make_device_matrix<unsigned>(handle, uMAX_PARENTS_PERQUERY, numQueries); // Dim: [numIterations * numQueries]
 	m_objGPUInst.d_L2ParentIds_aux = m_objGPUInst.d_L2ParentIds_aux_.data_handle();
 
 	// Default stream computations or transfers cannot be overalapped with operations on other streams
@@ -411,17 +410,17 @@ void BANGSearchInner<T>::bang_alloc(raft::device_resources handle, int numQuerie
 	m_objHostInst.numCPUthreads = 64;//64 // ToDo: get this dynamically from the platform
 
 	// Host Memory Allocation
-	oHostInst.neighbors_ = raft::make_pinned_matrix<uint32_t>(handle, numQueries, (m_objInputData.R+1));
-	oHostInst.neighbors = oHostInst.neighbors_.data_handle();
+	m_objHostInst.neighbors_ = raft::make_pinned_matrix<uint32_t>(handle, numQueries, (m_objInputData.R+1));
+	m_objHostInst.neighbors = m_objHostInst.neighbors_.data_handle();
 	// Note : R+1 is needed because MEDOID is added as additional neighbour in very first neighbour fetching (iteration)
-	oHostInst.numNeighbors_query_ = raft::make_pinned_vector<unsigned>(handle, numQueries);
-	oHostInst.numNeighbors_query = oHostInst.numNeighbors_query_.data_handle();
-	oHostInst.parents_ = raft::make_pinned_matrix<unsigned>(handle, numQueries, (SIZEPARENTLIST));
-	oHostInst.parents = oHostInst.parents_.data_handle();
+	m_objHostInst.numNeighbors_query_ = raft::make_pinned_vector<unsigned>(handle, numQueries);
+	m_objHostInst.numNeighbors_query = m_objHostInst.numNeighbors_query_.data_handle();
+	m_objHostInst.parents_ = raft::make_pinned_matrix<unsigned>(handle, numQueries, uint32_t(SIZEPARENTLIST));
+	m_objHostInst.parents = m_objHostInst.parents_.data_handle();
 	//m_objHostInst.L2ParentIds = (unsigned*)malloc(sizeof(unsigned) * numQueries);
 	//m_objHostInst.FPSetCoordsList_Counts = (unsigned*)malloc(sizeof(unsigned) * numQueries);
-	oHostInst.FPSetCoordsList_ = raft::make_pinned_vector<T>(handle, uMAX_PARENTS_PERQUERY * numQueries * m_objHostInst.FPSetCoords_size);
-	oHostInst.FPSetCoordsList = oHostInst.FPSetCoordsList_.data_handle();
+	m_objHostInst.FPSetCoordsList_ = raft::make_pinned_vector<T>(handle, uMAX_PARENTS_PERQUERY * numQueries * m_objHostInst.FPSetCoords_size);
+	m_objHostInst.FPSetCoordsList = m_objHostInst.FPSetCoordsList_.data_handle();
 }
 
 // Note:To be called after setSearchparams
@@ -969,7 +968,7 @@ void BANGSearchInner<T>::bang_query(raft::device_resources handle, T* queriesFP,
 	// We need FP vectors to calculate exact distances now. Compressed vectors are not used hereafter
 	// cudaStreamSynchronize(m_objGPUInst.streamFPTransfers);
 
-	compute_L2Dist<<<numQueries, m_objGPUInst.K4_blockSize, m_objInputData.D * sizeof(T), 0, m_objGPUInst.streamFPTransfers>>> (d_FPSetCoordsList,
+	compute_L2Dist<<<numQueries, m_objGPUInst.K4_blockSize, m_objInputData.D * sizeof(T), m_objGPUInst.streamFPTransfers>>> (d_FPSetCoordsList,
 												m_objGPUInst.d_FPSetCoordsList_Counts,
 												d_queriesFP,
 												m_objGPUInst.d_L2ParentIds,

@@ -15,8 +15,8 @@ limitations under the License.
 #ifndef BANG_H_
 #define BANG_H_
 
-#include <raft/core/device_resources.hpp>
 #include <cstdint>
+#include <raft/core/device_resources.hpp>
 
 #define MAX_L 512 // L_search Upper bound
 
@@ -41,7 +41,7 @@ class BANGSearch
     raft::device_resources handle_;
 
     public:
-    BANGSearch(raft:;device_resources handle);
+    BANGSearch(raft::device_resources handle);
     virtual ~BANGSearch();
 
     /*! @brief Load the graph index, compressed vectors etc into CPU/GPU memory.
@@ -52,13 +52,14 @@ class BANGSearch
     * @param[in] indexfile_path_prefix Absolute path location where DiskANN generated files are present.
     *               (including the file prefix)
     */
-    bool bang_load(raft::device_resources handle, char* indexfile_path_prefix);
+    bool bang_load( char* indexfile_path_prefix);
+
+    void bang_alloc(int numQueries);
 
 
+    void bang_init(int numQueries);
 
-    void bang_init(raft::device_resources handle, int numQueries);
-
-void bang_set_searchparams(int recall,
+    void bang_set_searchparams(int recall,
                             int worklist_length,
                             DistFunc nDistFunc=ENUM_DIST_L2);
 
@@ -73,8 +74,7 @@ void bang_set_searchparams(int recall,
     * @param[in] num_queries Number of queries to be used for the search.
     * @param[in] recal_param k-recall@k.
     */
-    void bang_query(raft::device_resources handle,
-                    T* query_array,
+    void bang_query(T* query_array,
                     int num_queries,
                     result_ann_t* nearestNeighbours,
 					float* nearestNeighbours_dist );
@@ -90,7 +90,7 @@ template class BANGSearch<int8_t>;
 
 #if 0
 // Note:  Equivalent "C" APIs have also been provided. For invocation from Python scripts (using CDLL package)
-extern "C" void bang_load_c(raft::device_resources handle, char* indexfile_path_prefix);
+extern "C" void bang_load_c( char* indexfile_path_prefix);
 
 extern "C"  void bang_set_searchparams_c(int recall, int worklist_length, DistFunc nDistFunc=ENUM_DIST_L2);
 
