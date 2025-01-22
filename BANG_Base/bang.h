@@ -16,6 +16,7 @@ limitations under the License.
 #define BANG_H_
 
 #include <cstdint>
+#include <raft/core/device_resources.hpp>
 
 #define MAX_L 512 // L_search Upper bound
 
@@ -37,9 +38,10 @@ template<typename T>
 class BANGSearch
 {
     void* m_pImpl;
+    raft::device_resources handle_;
 
     public:
-    BANGSearch();
+    BANGSearch(raft::device_resources handle);
     virtual ~BANGSearch();
 
     /*! @brief Load the graph index, compressed vectors etc into CPU/GPU memory.

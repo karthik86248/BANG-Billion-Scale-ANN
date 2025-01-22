@@ -14,16 +14,8 @@ limitations under the License.
 #ifndef UTILS_H_
 #define UTILS_H_
 
-
-#include <unistd.h>
-#include <stdio.h>
-#include <chrono>
-#include <fcntl.h>
-
-
 #include <cuda_runtime.h>
-
-#include <iostream>
+#include <stdio.h>
 
 #define gpuErrchk(ans) {gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort=true) {
