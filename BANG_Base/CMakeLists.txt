@@ -1,13 +1,14 @@
 # Minimum required version of CMake
 cmake_minimum_required(VERSION 3.24)
 
-set(CMAKE_ROOT /raid/tarangj/miniconda3/envs/bang/share/cmake-3.26)
 set(CMAKE_STANDARD 17)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(BANG_LANGUAGES CXX)
+list(APPEND BANG_LANGUAGES CUDA)
 # Project name
-project(bang)
+project(bang VERSION 0.0 LANGUAGES ${BANG_LANGUAGES})
 
 include(cmake/thirdparty/fetch_rapids.cmake)
 include(rapids-cmake)
@@ -17,6 +18,7 @@ include(rapids-export)
 include(rapids-find)
 
 rapids_cuda_init_architectures(bang)
+enable_language(CUDA)
 
 if(NOT TARGET raft::raft)
    find_package(raft)
