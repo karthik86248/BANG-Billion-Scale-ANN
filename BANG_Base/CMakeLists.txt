@@ -36,7 +36,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -fopenmp")
 set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -Xcompiler -fopenmp")
 
 # Define the shared library target (bang)
-cuda_add_library(bang SHARED bang_search.cu)
+add_library(bang OBJECT bang_search.cu)
 
 # Ensure position-independent code and separable compilation
 set_target_properties(bang PROPERTIES
