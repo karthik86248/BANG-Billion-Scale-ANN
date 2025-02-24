@@ -38,10 +38,9 @@ template<typename T>
 class BANGSearch
 {
     void* m_pImpl;
-    raft::device_resources handle_;
 
     public:
-    BANGSearch(raft::device_resources handle);
+    BANGSearch();
     virtual ~BANGSearch();
 
     /*! @brief Load the graph index, compressed vectors etc into CPU/GPU memory.
@@ -52,12 +51,12 @@ class BANGSearch
     * @param[in] indexfile_path_prefix Absolute path location where DiskANN generated files are present.
     *               (including the file prefix)
     */
-    bool bang_load( char* indexfile_path_prefix);
+    bool bang_load(raft::device_resources handle, char* indexfile_path_prefix);
 
-    void bang_alloc(int numQueries);
+    void bang_alloc(raft::device_resources handle, int numQueries);
 
 
-    void bang_init(int numQueries);
+    void bang_init(raft::device_resources handle, int numQueries);
 
     void bang_set_searchparams(int recall,
                             int worklist_length,
@@ -74,7 +73,7 @@ class BANGSearch
     * @param[in] num_queries Number of queries to be used for the search.
     * @param[in] recal_param k-recall@k.
     */
-    void bang_query(T* query_array,
+    void bang_query(raft::device_resources handle, T* query_array,
                     int num_queries,
                     result_ann_t* nearestNeighbours,
 					float* nearestNeighbours_dist );
@@ -90,11 +89,11 @@ template class BANGSearch<int8_t>;
 
 #if 0
 // Note:  Equivalent "C" APIs have also been provided. For invocation from Python scripts (using CDLL package)
-extern "C" void bang_load_c( char* indexfile_path_prefix);
+extern "C" void bang_load_c(raft::device_resources handle, char* indexfile_path_prefix);
 
 extern "C"  void bang_set_searchparams_c(int recall, int worklist_length, DistFunc nDistFunc=ENUM_DIST_L2);
 
-extern "C" void bang_query_c(uint8_t* query_array,
+extern "C" void bang_query_c(raft::device_resources handle, uint8_t* query_array,
                     int num_queries,
                     result_ann_t* nearestNeighbours,
 					float* nearestNeighbours_dist );

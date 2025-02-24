@@ -9,9 +9,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Project name
 project(bang)
 
-# Enable CUDA support (required if CUDA is present)
-find_package(CUDA REQUIRED)
-
 include(cmake/thirdparty/fetch_rapids.cmake)
 include(rapids-cmake)
 include(rapids-cpm)

@@ -66,7 +66,7 @@ using namespace std;
 using Clock = std::chrono::high_resolution_clock;
 
 template <typename T>
-BANGSearch<T>::BANGSearch(raft::device_resources handle) : handle_(handle)
+BANGSearch<T>::BANGSearch()
 {
 	m_pImpl = new BANGSearchInner<int>();
 }
@@ -79,24 +79,24 @@ BANGSearch<T>::~BANGSearch()
 }
 
 template<typename T>
-bool BANGSearch<T>::bang_load(char* indexfile_path_prefix)
+bool BANGSearch<T>::bang_load(raft::device_resources handle, char* indexfile_path_prefix)
 {
 	BANGSearchInner<T>* pobjBangInner = static_cast<BANGSearchInner<T>*>(m_pImpl);
-	return pobjBangInner->bang_load(handle_, indexfile_path_prefix);
+	return pobjBangInner->bang_load(handle, indexfile_path_prefix);
 }
 
 template<typename T>
-void BANGSearch<T>::bang_alloc(int numQueries)
+void BANGSearch<T>::bang_alloc(raft::device_resources handle, int numQueries)
 {
 	BANGSearchInner<T>* pobjBangInner = static_cast<BANGSearchInner<T>*>(m_pImpl);
-	pobjBangInner->bang_alloc(handle_, uint32_t(numQueries));
+	pobjBangInner->bang_alloc(handle, uint32_t(numQueries));
 }
 
 template<typename T>
-void BANGSearch<T>::bang_init(int numQueries)
+void BANGSearch<T>::bang_init(raft::device_resources handle, int numQueries)
 {
 	BANGSearchInner<T>* pobjBangInner = static_cast<BANGSearchInner<T>*>(m_pImpl);
-	pobjBangInner->bang_init(handle_, numQueries);
+	pobjBangInner->bang_init(handle, numQueries);
 }
 
 template<typename T>
@@ -105,17 +105,17 @@ void BANGSearch<T>::bang_set_searchparams(int recall,
                             DistFunc nDistFunc)
 {
 	BANGSearchInner<T>* pobjBangInner = static_cast<BANGSearchInner<T>*>(m_pImpl);
-	return pobjBangInner->bang_set_searchparams(handle_, recall, worklist_length, nDistFunc);
+	return pobjBangInner->bang_set_searchparams(recall, worklist_length, nDistFunc);
 }
 
 template<typename T>
-void BANGSearch<T>::bang_query(T* query_array,
+void BANGSearch<T>::bang_query(raft::device_resources handle, T* query_array,
                     int num_queries,
                     result_ann_t* nearestNeighbours,
 					float* nearestNeighbours_dist )
 {
 	BANGSearchInner<T>* pobjBangInner = static_cast<BANGSearchInner<T>*>(m_pImpl);
-	pobjBangInner->bang_query(handle_, query_array, num_queries, nearestNeighbours, nearestNeighbours_dist);
+	pobjBangInner->bang_query(handle, query_array, num_queries, nearestNeighbours, nearestNeighbours_dist);
 }
 
 template<typename T>
@@ -561,7 +561,7 @@ void BANGSearchInner<T>::bang_unload()
 }
 
 template<typename T>
-void BANGSearchInner<T>::bang_set_searchparams(raft::device_resources handle, int recall, int worklist_length, DistFunc nDistFunc)
+void BANGSearchInner<T>::bang_set_searchparams(int recall, int worklist_length, DistFunc nDistFunc)
 {
 	m_objSearchParams.recall = recall;
 	m_objSearchParams.worklist_length = worklist_length;
@@ -997,9 +997,9 @@ void BANGSearchInner<T>::bang_query(raft::device_resources handle, T* queriesFP,
 	start = std::chrono::high_resolution_clock::now();
 #endif
 	gpuErrchk(cudaMemcpyAsync(nearestNeighbours, m_objGPUInst.d_nearestNeighbours, sizeof(result_ann_t) * (m_objSearchParams.recall * numQueries),
-				cudaMemcpyDeviceToHost));
+				cudaMemcpyDefault, handle.get_stream()));
 	gpuErrchk(cudaMemcpyAsync(nearestNeighbours_dist, m_objGPUInst.d_L2distances, sizeof(float) * (m_objSearchParams.recall * numQueries),
-				cudaMemcpyDeviceToHost));
+				cudaMemcpyDefault, handle.get_stream()));
 
 #ifdef _TIMERS
 	stop = std::chrono::high_resolution_clock::now();

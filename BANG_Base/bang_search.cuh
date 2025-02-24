@@ -395,7 +395,7 @@ public:
     
     void bang_init(raft::device_resources handle, int numQueries);
 
-    void bang_set_searchparams(raft::device_resources handle, int recall, 
+    void bang_set_searchparams(int recall, 
                             int worklist_length,
                             DistFunc nDistFunc=ENUM_DIST_L2);
     
