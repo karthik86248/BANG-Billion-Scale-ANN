@@ -1,11 +1,28 @@
 # Minimum required version of CMake
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.24)
 
+set(CMAKE_STANDARD 17)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+set(BANG_LANGUAGES CXX)
+list(APPEND BANG_LANGUAGES CUDA)
 # Project name
-project(Bang)
+project(bang VERSION 0.0 LANGUAGES ${BANG_LANGUAGES})
 
-# Enable CUDA support (required if CUDA is present)
-find_package(CUDA REQUIRED)
+include(cmake/thirdparty/fetch_rapids.cmake)
+include(rapids-cmake)
+include(rapids-cpm)
+include(rapids-cuda)
+include(rapids-export)
+include(rapids-find)
+
+rapids_cuda_init_architectures(bang)
+enable_language(CUDA)
+
+if(NOT TARGET raft::raft)
+   find_package(raft)
+ endif()
 
 # Include directories
 include_directories(
@@ -13,13 +30,13 @@ include_directories(
 )
 
 # Set compiler options for C++ and OpenMP
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14 -fopenmp")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -fopenmp")
 
 # Set options for nvcc
-set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -Xcompiler -fopenmp -std=c++14 --compiler-options '-fPIC' -O3")
+set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -Xcompiler -fopenmp")
 
 # Define the shared library target (bang)
-cuda_add_library(bang SHARED bang_search.cu)
+add_library(bang OBJECT bang_search.cu)
 
 # Ensure position-independent code and separable compilation
 set_target_properties(bang PROPERTIES
@@ -28,8 +45,9 @@ set_target_properties(bang PROPERTIES
 )
 
 # Specify the test driver executable
-add_executable(bang_search test_driver.cpp)
-target_link_libraries(bang_search PRIVATE bang dl)
+target_link_libraries(bang raft::raft)
+#add_executable(bang_search test_driver.cpp)
+#target_link_libraries(bang_search PRIVATE bang dl)
 
 # Clean rule (optional, CMake handles this with 'make clean')
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY CLEAN_DIRECTORIES "bang.so;bang_search")

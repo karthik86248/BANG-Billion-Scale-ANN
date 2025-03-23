@@ -22,6 +22,13 @@ limitations under the License.
 #include <fstream>
 #include <sstream>
 
+#include <raft/core/device_mdarray.hpp>
+#include <raft/core/device_mdspan.hpp>
+#include <raft/core/device_resources.hpp>
+#include <raft/core/host_mdarray.hpp>
+#include <raft/core/host_mdspan.hpp>
+#include <raft/core/pinned_mdarray.hpp>
+#include <raft/core/resource/cuda_stream_pool.hpp>
 
 #define ROUND_UP(X, Y) \
 	((((uint64_t)(X) / (Y)) + ((uint64_t)(X) % (Y) != 0)) * (Y))
@@ -65,17 +72,21 @@ typedef struct _IndexLoad
 	unsigned long long ullIndex_Entry_LEN;
 
 	// Device Memory allocations
+	raft::device_matrix<uint8_t, uint32_t, raft::row_major> d_compressedVectors_;
 	uint8_t* d_compressedVectors;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_pqTable_;
 	float *d_pqTable;
+	raft::device_vector<unsigned, uint32_t, raft::row_major> d_chunksOffset_;
 	unsigned  *d_chunksOffset;
+	raft::device_vector<float, uint32_t, raft::row_major> d_centroid_;
 	float *d_centroid;
 
 	// Host Memory allocation
 	uint8_t* pIndex;
 } IndexLoad;
 
-
-typedef struct _GPUInstance
+template<typename T>
+struct GPUInstance
 {
 	// Kernel threadblock sizes
 	unsigned numThreads_K4 ; //	compute_parent kernel
@@ -86,24 +97,43 @@ typedef struct _GPUInstance
 	unsigned K4_blockSize ;
 	unsigned numThreads_K5; // neighbor_filtering_new
 	// Device Memory
-	void *d_queriesFP ; // Input
+	raft::device_matrix<T, uint32_t, raft::row_major> d_queriesFP_ ;
+	T *d_queriesFP ; // Input
+	raft::device_matrix<result_ann_t, uint32_t, raft::row_major> d_nearestNeighbours_;
 	result_ann_t *d_nearestNeighbours = NULL; // The final output of ANNs
+	raft::device_matrix<float, uint32_t, raft::row_major> d_pqDistTables_;
 	float *d_pqDistTables;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_BestLSetsDist_;
 	float *d_BestLSetsDist;
+	raft::device_vector<unsigned, uint32_t, raft::row_major> d_BestLSets_count_;
 	unsigned *d_BestLSets_count ;
+	raft::device_matrix<unsigned, uint32_t, raft::row_major> d_BestLSets_;
 	unsigned *d_BestLSets ;
+	raft::device_matrix<bool, uint32_t, raft::row_major> d_BestLSets_visited_;
 	bool *d_BestLSets_visited ;
+	raft::device_matrix<unsigned, uint32_t, raft::row_major> d_parents_;
 	unsigned *d_parents ;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_neighborsDist_query_;
 	float *d_neighborsDist_query ;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_neighborsDist_query_aux_;
 	float *d_neighborsDist_query_aux ;
+	raft::device_matrix<unsigned, uint32_t, raft::row_major> d_neighbors_;
 	unsigned *d_neighbors ;
+	raft::device_matrix<unsigned, uint32_t, raft::row_major> d_neighbors_aux_;
 	unsigned *d_neighbors_aux ;
+	raft::device_vector<unsigned, uint32_t, raft::row_major> d_numNeighbors_query_;
 	unsigned *d_numNeighbors_query ;
+	raft::device_matrix<unsigned, uint32_t, raft::row_major> d_neighbors_temp_;
 	unsigned *d_neighbors_temp ;
+	raft::device_vector<uint32_t, uint32_t, raft::row_major> d_numNeighbors_query_temp_;
 	unsigned *d_numNeighbors_query_temp ;
+	raft::device_scalar<uint32_t> d_iter_;
 	unsigned *d_iter ;
+	raft::device_vector<uint32_t, uint32_t, raft::row_major> d_mark_;
 	unsigned *d_mark ;
+	raft::device_scalar<bool> d_nextIter_;
 	bool *d_nextIter ;
+	raft::device_matrix<bool, uint32_t, raft::row_major> d_processed_bit_vec_;
 	bool *d_processed_bit_vec ;
 
 	// The FP vectors corresponding to each candidate is fetched asynchronously for all the queries in the iteration.
@@ -119,11 +149,17 @@ typedef struct _GPUInstance
 	// Every iteration: [1 * numQuereis] row added
 	// Dimensoins of 2D array : [numIterations * numQueries]
 	// numIterations upper bound is MAX_PARENTS_PERQUERY
-	void* d_FPSetCoordsList;
+	raft::device_matrix<T, uint32_t, raft::row_major> d_FPSetCoordsList_;
+	T* d_FPSetCoordsList;
+	raft::device_vector<uint32_t, uint32_t, raft::row_major> d_FPSetCoordsList_Counts_;
 	unsigned* d_FPSetCoordsList_Counts;
+	raft::device_matrix<float, uint32_t, raft::row_major> d_L2distances_;
 	float* d_L2distances ; // M x N dimensions
+	raft::device_matrix<uint32_t, uint32_t, raft::row_major> d_L2ParentIds_;
 	unsigned* d_L2ParentIds ; // // M x N dimensions
+	raft::device_matrix<float, uint32_t, raft::row_major> d_L2distances_aux_;
 	float* d_L2distances_aux ; // M x N dimensions
+	raft::device_matrix<uint32_t, uint32_t, raft::row_major> d_L2ParentIds_aux_;
 	unsigned* d_L2ParentIds_aux ; // // M x N dimensions
 
 	//  Specific Streams for
@@ -132,24 +168,28 @@ typedef struct _GPUInstance
  	cudaStream_t streamChildren; // H2D
 	cudaStream_t streamKernels; // kernels executions
 
-}GPUInstance;
+};
 
-
-typedef struct _HostInstance
+template<typename T>
+struct HostInstance
 {
 	unsigned numCPUthreads; //64 // ToDo: get the core count dynamically from the platform
+	raft::pinned_matrix<unsigned, uint32_t, raft::row_major> parents_;
 	unsigned *parents = NULL;
+	raft::pinned_matrix<unsigned, uint32_t, raft::row_major> neighbors_;
 	unsigned *neighbors = NULL;
+	raft::pinned_vector<unsigned, uint32_t, raft::row_major> numNeighbors_query_;
 	unsigned *numNeighbors_query = NULL;
 	//unsigned *L2ParentIds;
 	//unsigned* FPSetCoordsList_Counts;
-	void* FPSetCoordsList;
+	raft::pinned_vector<T, uint32_t, raft::row_major> FPSetCoordsList_;
+	T* FPSetCoordsList;
 	unsigned long long FPSetCoords_size_bytes ;
 	unsigned long long FPSetCoords_rowsize_bytes;
-	unsigned long long FPSetCoords_size ; // no of entries in one vector
+	unsigned FPSetCoords_size ; // no of entries in one vector
 	unsigned long long FPSetCoords_rowsize; // no of entries in one row of the FPSetCoordsList matrix
 	
-}HostInstance;
+};
 
 typedef struct _SearchParams
 {
@@ -343,22 +383,23 @@ class BANGSearchInner
 {
 	IndexLoad m_objInputData;
 	SearchParams m_objSearchParams;
-	GPUInstance m_objGPUInst;
-	HostInstance m_objHostInst;
+	GPUInstance<T> m_objGPUInst;
+	HostInstance<T> m_objHostInst;
 
 public:
+	BANGSearchInner();
     
-    bool bang_load( char* indexfile_path_prefix);
+    bool bang_load(raft::device_resources handle, char* indexfile_path_prefix);
 
-    void bang_alloc(int numQueries);
+    void bang_alloc(raft::device_resources handle, uint32_t numQueries);
     
-    void bang_init(int numQueries);
+    void bang_init(raft::device_resources handle, int numQueries);
 
     void bang_set_searchparams(int recall, 
                             int worklist_length,
                             DistFunc nDistFunc=ENUM_DIST_L2);
     
-    void bang_query(T* query_array, 
+    void bang_query(raft::device_resources handle, T* query_array, 
                     int num_queries, 
                     result_ann_t* nearestNeighbours,
 					float* nearestNeighbours_dist );

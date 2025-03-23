@@ -79,24 +79,24 @@ BANGSearch<T>::~BANGSearch()
 }
 
 template<typename T>
-bool BANGSearch<T>::bang_load( char* indexfile_path_prefix)
+bool BANGSearch<T>::bang_load(raft::device_resources handle, char* indexfile_path_prefix)
 {
 	BANGSearchInner<T>* pobjBangInner = static_cast<BANGSearchInner<T>*>(m_pImpl);
-	return pobjBangInner->bang_load(indexfile_path_prefix);
+	return pobjBangInner->bang_load(handle, indexfile_path_prefix);
 }
 
 template<typename T>
-void BANGSearch<T>::bang_alloc(int numQueries)
+void BANGSearch<T>::bang_alloc(raft::device_resources handle, int numQueries)
 {
 	BANGSearchInner<T>* pobjBangInner = static_cast<BANGSearchInner<T>*>(m_pImpl);
-	pobjBangInner->bang_alloc(numQueries);
+	pobjBangInner->bang_alloc(handle, uint32_t(numQueries));
 }
 
 template<typename T>
-void BANGSearch<T>::bang_init(int numQueries)
+void BANGSearch<T>::bang_init(raft::device_resources handle, int numQueries)
 {
 	BANGSearchInner<T>* pobjBangInner = static_cast<BANGSearchInner<T>*>(m_pImpl);
-	pobjBangInner->bang_init(numQueries);
+	pobjBangInner->bang_init(handle, numQueries);
 }
 
 template<typename T>
@@ -109,13 +109,13 @@ void BANGSearch<T>::bang_set_searchparams(int recall,
 }
 
 template<typename T>
-void BANGSearch<T>::bang_query(T* query_array,
+void BANGSearch<T>::bang_query(raft::device_resources handle, T* query_array,
                     int num_queries,
                     result_ann_t* nearestNeighbours,
 					float* nearestNeighbours_dist )
 {
 	BANGSearchInner<T>* pobjBangInner = static_cast<BANGSearchInner<T>*>(m_pImpl);
-	pobjBangInner->bang_query(query_array, num_queries, nearestNeighbours, nearestNeighbours_dist);
+	pobjBangInner->bang_query(handle, query_array, num_queries, nearestNeighbours, nearestNeighbours_dist);
 }
 
 template<typename T>
@@ -134,7 +134,7 @@ void BANGSearch<T>::bang_unload()
 
 
 template<typename T>
-bool BANGSearchInner<T>::bang_load(char* indexfile_path_prefix)
+bool BANGSearchInner<T>::bang_load(raft::device_resources handle, char* indexfile_path_prefix)
 {
 	string diskann_Generatedfiles_path = string(indexfile_path_prefix);
 	string pqTable_file = diskann_Generatedfiles_path +  PQ_PIVOTS_FILE_SUFFIX;//string(argv[1]); // Pivot files
@@ -263,20 +263,24 @@ bool BANGSearchInner<T>::bang_load(char* indexfile_path_prefix)
 	cout << "Finished reading bin file." << endl;
 	// To reduce Peak Host memory usage, loading compressed vectors to CPU and transferring to GPU and releasing host memory
 	printf("Transferring Compressed Vectors to GPU ...\n");
-	gpuErrchk(cudaMalloc(&m_objInputData.d_compressedVectors, sizeof(uint8_t) * N * uChunks)); 	//100M*100 ~10GB
-	gpuErrchk(cudaMemcpy(m_objInputData.d_compressedVectors, compressedVectors, (unsigned long long)(sizeof(uint8_t) * (unsigned long long)(uChunks)*N),
-	cudaMemcpyHostToDevice));
+	m_objInputData.d_compressedVectors_ = raft::make_device_matrix<uint8_t, uint32_t>(handle, N, uChunks); 	//100M*100 ~10GB
+	m_objInputData.d_compressedVectors = m_objInputData.d_compressedVectors_.data_handle();
+	gpuErrchk(cudaMemcpyAsync(m_objInputData.d_compressedVectors, compressedVectors, (unsigned long long)(sizeof(uint8_t) * (unsigned long long)(uChunks)*N),
+	cudaMemcpyHostToDevice, handle.get_stream()));
 	free(compressedVectors);
 	compressedVectors = NULL;
 
-	gpuErrchk(cudaMalloc(&m_objInputData.d_pqTable, sizeof(float) * (256*m_objInputData.D)));
-	gpuErrchk(cudaMalloc(&m_objInputData.d_chunksOffset, sizeof(unsigned) * (m_objInputData.uChunks+1)));
-	gpuErrchk(cudaMalloc(&m_objInputData.d_centroid, sizeof(float) * (m_objInputData.D)));
+	m_objInputData.d_pqTable_ = raft::make_device_matrix<float>(handle, uint32_t(256), m_objInputData.D);
+	m_objInputData.d_pqTable = m_objInputData.d_pqTable_.data_handle();
+	m_objInputData.d_chunksOffset_ = raft::make_device_vector<uint32_t>(handle, m_objInputData.uChunks+1);
+	m_objInputData.d_chunksOffset = m_objInputData.d_chunksOffset_.data_handle();
+	m_objInputData.d_centroid_ = raft::make_device_vector<float>(handle, m_objInputData.D);
+	m_objInputData.d_centroid = m_objInputData.d_centroid_.data_handle();
 
 	// host to device transfer
-	gpuErrchk(cudaMemcpy(m_objInputData.d_pqTable, pqTable_T, sizeof(float) * (256*m_objInputData.D), cudaMemcpyHostToDevice));
-	gpuErrchk(cudaMemcpy(m_objInputData.d_chunksOffset, chunksOffset, sizeof(unsigned) * (m_objInputData.uChunks+1), cudaMemcpyHostToDevice));
-	gpuErrchk(cudaMemcpy(m_objInputData.d_centroid, centroid, sizeof(float) * (m_objInputData.D), cudaMemcpyHostToDevice));
+	gpuErrchk(cudaMemcpyAsync(m_objInputData.d_pqTable, pqTable_T, sizeof(float) * (256*m_objInputData.D), cudaMemcpyHostToDevice, handle.get_stream()));
+	gpuErrchk(cudaMemcpyAsync(m_objInputData.d_chunksOffset, chunksOffset, sizeof(unsigned) * (m_objInputData.uChunks+1), cudaMemcpyHostToDevice, handle.get_stream()));
+	gpuErrchk(cudaMemcpyAsync(m_objInputData.d_centroid, centroid, sizeof(float) * (m_objInputData.D), cudaMemcpyHostToDevice, handle.get_stream()));
 
 	// Load the Vamana(DiskANN) Graph Index
 	m_objInputData.size_indexfile  = caclulate_filesize(graphAdjListAndFP_file.c_str());
@@ -284,10 +288,6 @@ bool BANGSearchInner<T>::bang_load(char* indexfile_path_prefix)
 	if (NULL == m_objInputData.pIndex)
 	{
 		printf("Error.. Malloc failed for Graph Index.\n");
-		gpuErrchk(cudaFree(m_objInputData.d_compressedVectors));
-		gpuErrchk(cudaFree(&m_objInputData.d_pqTable));
-		gpuErrchk(cudaFree(&m_objInputData.d_chunksOffset));
-		gpuErrchk(cudaFree(&m_objInputData.d_centroid));
 		bRet = false;
 		goto cleanup;
 	}
@@ -334,7 +334,7 @@ cleanup:
 
 
 template<typename T>
-void BANGSearchInner<T>::bang_alloc(int numQueries)
+void BANGSearchInner<T>::bang_alloc(raft::device_resources handle, uint32_t numQueries)
 {
 	// Assignments needed for determining allocation sizes
 	const unsigned uMAX_PARENTS_PERQUERY = (m_objSearchParams.worklist_length + NAX_EXTRA_ITERATION) ;
@@ -345,31 +345,58 @@ void BANGSearchInner<T>::bang_alloc(int numQueries)
 
 
 	// Allocations on GPU
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_queriesFP, sizeof(T) * (numQueries*m_objInputData.D)));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_nearestNeighbours, (m_objSearchParams.recall * numQueries) * sizeof(result_ann_t) ));// Dim: [recall_at * numQueries]
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_pqDistTables, sizeof(float) * (256*m_objInputData.uChunks*numQueries)));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_BestLSetsDist, sizeof(float) * (numQueries*(m_objSearchParams.worklist_length))));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_BestLSets_count, sizeof(unsigned) * (numQueries)));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_BestLSets_visited, sizeof(bool) * (numQueries* (m_objSearchParams.worklist_length))));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_BestLSets, sizeof(unsigned) * (numQueries* (m_objSearchParams.worklist_length))));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_parents, sizeof(unsigned) * (numQueries*(SIZEPARENTLIST))));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_neighbors, sizeof(unsigned) * (numQueries*(m_objInputData.R+1))));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_neighbors_temp, sizeof(unsigned) * (numQueries*(m_objInputData.R+1))));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_neighbors_aux, sizeof(unsigned) * (numQueries*(m_objInputData.R+1))));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_numNeighbors_query, sizeof(unsigned) * (numQueries)));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_numNeighbors_query_temp, sizeof(unsigned) * (numQueries)));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_neighborsDist_query, sizeof(float) * (numQueries*(m_objInputData.R+1))));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_neighborsDist_query_aux, sizeof(float) * (numQueries*(m_objInputData.R+1))));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_processed_bit_vec, sizeof(bool)*BF_MEMORY*numQueries));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_nextIter, sizeof(bool)));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_iter, sizeof(unsigned)));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_mark, sizeof(unsigned) * (numQueries)));			// ~40KB
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_FPSetCoordsList_Counts, numQueries * sizeof(unsigned) ));
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_FPSetCoordsList, (uMAX_PARENTS_PERQUERY * numQueries) * m_objHostInst.FPSetCoords_size_bytes )); // Dim: [numIterations * numQueries]
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_L2distances, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(float) )); // Dim: [numIterations * numQueries]
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_L2ParentIds, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(unsigned) )); // Dim: [numIterations * numQueries]
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_L2distances_aux, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(float) )); // Dim: [numIterations * numQueries]
-	gpuErrchk(cudaMalloc(&m_objGPUInst.d_L2ParentIds_aux, (uMAX_PARENTS_PERQUERY * numQueries) * sizeof(unsigned) )); // Dim: [numIterations * numQueries]
+	m_objGPUInst.d_queriesFP_ = raft::make_device_matrix<T>(handle, numQueries, m_objInputData.D);
+	m_objGPUInst.d_queriesFP = m_objGPUInst.d_queriesFP_.data_handle();
+	m_objGPUInst.d_nearestNeighbours_ = raft::make_device_matrix<result_ann_t>(handle, numQueries, uint32_t(m_objSearchParams.recall));
+	m_objGPUInst.d_nearestNeighbours = m_objGPUInst.d_nearestNeighbours_.data_handle();
+	m_objGPUInst.d_pqDistTables_ = raft::make_device_matrix<float>(handle, 256*m_objInputData.uChunks, uint32_t(numQueries));
+	m_objGPUInst.d_pqDistTables = m_objGPUInst.d_pqDistTables_.data_handle();
+	m_objGPUInst.d_BestLSetsDist_ = raft::make_device_matrix<float>(handle, numQueries, uint32_t(m_objSearchParams.worklist_length));
+	m_objGPUInst.d_BestLSetsDist = m_objGPUInst.d_BestLSetsDist_.data_handle();
+	m_objGPUInst.d_BestLSets_count_ = raft::make_device_vector<uint32_t>(handle, numQueries);
+	m_objGPUInst.d_BestLSets_count = m_objGPUInst.d_BestLSets_count_.data_handle();
+	m_objGPUInst.d_BestLSets_visited_ = raft::make_device_matrix<bool>(handle, numQueries, uint32_t(m_objSearchParams.worklist_length));
+	m_objGPUInst.d_BestLSets_visited = m_objGPUInst.d_BestLSets_visited_.data_handle();
+	m_objGPUInst.d_BestLSets_ = raft::make_device_matrix<unsigned>(handle, numQueries, uint32_t(m_objSearchParams.worklist_length));
+	m_objGPUInst.d_BestLSets = m_objGPUInst.d_BestLSets_.data_handle();
+	m_objGPUInst.d_parents_ = raft::make_device_matrix<unsigned>(handle, numQueries, uint32_t(SIZEPARENTLIST));
+	m_objGPUInst.d_parents = m_objGPUInst.d_parents_.data_handle();
+	m_objGPUInst.d_neighbors_ = raft::make_device_matrix<unsigned>(handle, numQueries, (m_objInputData.R+1));
+	m_objGPUInst.d_neighbors = m_objGPUInst.d_neighbors_.data_handle();
+	m_objGPUInst.d_neighbors_temp_ = raft::make_device_matrix<unsigned>(handle, numQueries, (m_objInputData.R+1));
+	m_objGPUInst.d_neighbors_temp = m_objGPUInst.d_neighbors_temp_.data_handle();
+	m_objGPUInst.d_neighbors_aux_ = raft::make_device_matrix<unsigned>(handle, numQueries, (m_objInputData.R+1));
+	m_objGPUInst.d_neighbors_aux = m_objGPUInst.d_neighbors_aux_.data_handle();
+	m_objGPUInst.d_numNeighbors_query_ = raft::make_device_vector<unsigned>(handle, numQueries);
+	m_objGPUInst.d_numNeighbors_query = m_objGPUInst.d_numNeighbors_query_.data_handle();
+	m_objGPUInst.d_numNeighbors_query_temp_ = raft::make_device_vector<unsigned>(handle, numQueries);
+	m_objGPUInst.d_numNeighbors_query_temp = m_objGPUInst.d_numNeighbors_query_temp_.data_handle();
+	m_objGPUInst.d_neighborsDist_query_ = raft::make_device_matrix<float>(handle, numQueries, (m_objInputData.R+1));
+	m_objGPUInst.d_neighborsDist_query = m_objGPUInst.d_neighborsDist_query_.data_handle();
+	m_objGPUInst.d_neighborsDist_query_aux_ = raft::make_device_matrix<float>(handle, numQueries, (m_objInputData.R+1));
+	m_objGPUInst.d_neighborsDist_query_aux = m_objGPUInst.d_neighborsDist_query_aux_.data_handle();
+	m_objGPUInst.d_numNeighbors_query_ = raft::make_device_vector<unsigned>(handle, numQueries);
+	m_objGPUInst.d_numNeighbors_query = m_objGPUInst.d_numNeighbors_query_.data_handle();
+	m_objGPUInst.d_processed_bit_vec_ = raft::make_device_matrix<bool>(handle, numQueries, BF_MEMORY);
+	m_objGPUInst.d_processed_bit_vec = m_objGPUInst.d_processed_bit_vec_.data_handle();
+	m_objGPUInst.d_nextIter_ = raft::make_device_scalar<bool>(handle, 0);
+	m_objGPUInst.d_nextIter = m_objGPUInst.d_nextIter_.data_handle();
+	m_objGPUInst.d_iter_ = raft::make_device_scalar<unsigned>(handle, 0);
+	m_objGPUInst.d_iter = m_objGPUInst.d_iter_.data_handle();
+	m_objGPUInst.d_mark_ = raft::make_device_vector<unsigned>(handle, numQueries); // ~40KB
+	m_objGPUInst.d_mark = m_objGPUInst.d_mark_.data_handle();
+	m_objGPUInst.d_FPSetCoordsList_Counts_ = raft::make_device_vector<unsigned>(handle, numQueries);
+	m_objGPUInst.d_FPSetCoordsList_Counts = m_objGPUInst.d_FPSetCoordsList_Counts_.data_handle();
+	m_objGPUInst.d_FPSetCoordsList_ = raft::make_device_matrix<T>(handle, uMAX_PARENTS_PERQUERY * numQueries, m_objHostInst.FPSetCoords_size); // Dim: [numIterations * numQueries]
+	m_objGPUInst.d_FPSetCoordsList = m_objGPUInst.d_FPSetCoordsList_.data_handle();
+	m_objGPUInst.d_L2distances_ = raft::make_device_matrix<float>(handle, uMAX_PARENTS_PERQUERY, numQueries); // Dim: [numIterations * numQueries]
+	m_objGPUInst.d_L2distances =  m_objGPUInst.d_L2distances_.data_handle();
+	m_objGPUInst.d_L2ParentIds_ = raft::make_device_matrix<unsigned>(handle, uMAX_PARENTS_PERQUERY, numQueries);
+	m_objGPUInst.d_L2ParentIds = m_objGPUInst.d_L2ParentIds_.data_handle();
+	m_objGPUInst.d_L2distances_aux_ = raft::make_device_matrix<float>(handle, uMAX_PARENTS_PERQUERY, numQueries);
+	m_objGPUInst.d_L2distances_aux = m_objGPUInst.d_L2distances_aux_.data_handle();
+	m_objGPUInst.d_L2ParentIds_aux_ = raft::make_device_matrix<unsigned>(handle, uMAX_PARENTS_PERQUERY, numQueries); // Dim: [numIterations * numQueries]
+	m_objGPUInst.d_L2ParentIds_aux = m_objGPUInst.d_L2ParentIds_aux_.data_handle();
 
 	// Default stream computations or transfers cannot be overalapped with operations on other streams
 	// Hence creating separate streams for transfers and computations to achieve overlap
@@ -377,26 +404,31 @@ void BANGSearchInner<T>::bang_alloc(int numQueries)
 	gpuErrchk(cudaStreamCreate(&m_objGPUInst.streamFPTransfers));
 	gpuErrchk(cudaStreamCreate(&m_objGPUInst.streamParent));
 	gpuErrchk(cudaStreamCreate(&m_objGPUInst.streamChildren));
-	gpuErrchk(cudaStreamCreate(&m_objGPUInst.streamKernels));
+	m_objGPUInst.streamKernels = handle.get_stream();
 
 	// Host size params
 	m_objHostInst.numCPUthreads = 64;//64 // ToDo: get this dynamically from the platform
 
 	// Host Memory Allocation
-	gpuErrchk(cudaMallocHost(&m_objHostInst.neighbors, sizeof(unsigned) * (numQueries*(m_objInputData.R+1))) );
+	m_objHostInst.neighbors_ = raft::make_pinned_matrix<uint32_t>(handle, numQueries, (m_objInputData.R+1));
+	m_objHostInst.neighbors = m_objHostInst.neighbors_.data_handle();
 	// Note : R+1 is needed because MEDOID is added as additional neighbour in very first neighbour fetching (iteration)
-	gpuErrchk(cudaMallocHost(&m_objHostInst.numNeighbors_query,sizeof(unsigned) * (numQueries) ));
-	gpuErrchk(cudaMallocHost(&m_objHostInst.parents,sizeof(unsigned) * numQueries * (SIZEPARENTLIST)));
+	m_objHostInst.numNeighbors_query_ = raft::make_pinned_vector<unsigned>(handle, numQueries);
+	m_objHostInst.numNeighbors_query = m_objHostInst.numNeighbors_query_.data_handle();
+	m_objHostInst.parents_ = raft::make_pinned_matrix<unsigned>(handle, numQueries, uint32_t(SIZEPARENTLIST));
+	m_objHostInst.parents = m_objHostInst.parents_.data_handle();
 	//m_objHostInst.L2ParentIds = (unsigned*)malloc(sizeof(unsigned) * numQueries);
 	//m_objHostInst.FPSetCoordsList_Counts = (unsigned*)malloc(sizeof(unsigned) * numQueries);
-	gpuErrchk(cudaMallocHost(&m_objHostInst.FPSetCoordsList, (uMAX_PARENTS_PERQUERY * numQueries) * m_objHostInst.FPSetCoords_size_bytes));
+	m_objHostInst.FPSetCoordsList_ = raft::make_pinned_vector<T>(handle, uMAX_PARENTS_PERQUERY * numQueries * m_objHostInst.FPSetCoords_size);
+	m_objHostInst.FPSetCoordsList = m_objHostInst.FPSetCoordsList_.data_handle();
 }
 
 // Note:To be called after setSearchparams
 // Set-up params and pre-compute as much we can before the actural query processing can begin
 template<typename T>
-void BANGSearchInner<T>::bang_init(int numQueries)
+void BANGSearchInner<T>::bang_init(raft::device_resources handle, int numQueries)
 {
+	auto stream = handle.get_stream();
 
 	// Initialize GPU related attributes
 	m_objGPUInst.numThreads_K4 = 1; //	compute_parent kernel
@@ -407,14 +439,14 @@ void BANGSearchInner<T>::bang_init(int numQueries)
 	m_objGPUInst.numThreads_K5 =256;// neighbor_filtering_new
 	m_objGPUInst.numThreads_K3_merge = 2*m_objSearchParams.worklist_length;
 	assert(m_objGPUInst.numThreads_K3_merge <= 1024);	// Max thread block size
-	gpuErrchk(cudaMemset(m_objGPUInst.d_iter,0,sizeof(unsigned)));
+	gpuErrchk(cudaMemsetAsync(m_objGPUInst.d_iter,0,sizeof(unsigned), stream));
 
-	gpuErrchk(cudaMemset(m_objGPUInst.d_pqDistTables,0,sizeof(float) * (m_objInputData.uChunks * 256 * numQueries)));
-	gpuErrchk(cudaMemset(m_objGPUInst.d_processed_bit_vec, 0, sizeof(bool)*BF_MEMORY*numQueries));
-	gpuErrchk(cudaMemset(m_objGPUInst.d_parents, 0, sizeof(unsigned)*(numQueries*(SIZEPARENTLIST))));
-	gpuErrchk(cudaMemset(m_objGPUInst.d_BestLSets_count, 0, sizeof(unsigned)*(numQueries)));
-	gpuErrchk(cudaMemset(m_objGPUInst.d_mark, 1, sizeof(unsigned)*(numQueries))); // ToDo, should be 0?
-	gpuErrchk(cudaMemset(m_objGPUInst.d_neighborsDist_query,0,sizeof(float) * (numQueries*(m_objInputData.R+1))));
+	gpuErrchk(cudaMemsetAsync(m_objGPUInst.d_pqDistTables,0,sizeof(float) * (m_objInputData.uChunks * 256 * numQueries), stream));
+	gpuErrchk(cudaMemsetAsync(m_objGPUInst.d_processed_bit_vec, 0, sizeof(bool)*BF_MEMORY*numQueries, stream));
+	gpuErrchk(cudaMemsetAsync(m_objGPUInst.d_parents, 0, sizeof(unsigned)*(numQueries*(SIZEPARENTLIST)), stream));
+	gpuErrchk(cudaMemsetAsync(m_objGPUInst.d_BestLSets_count, 0, sizeof(unsigned)*(numQueries), stream));
+	gpuErrchk(cudaMemsetAsync(m_objGPUInst.d_mark, 1, sizeof(unsigned)*(numQueries), stream)); // ToDo, should be 0?
+	gpuErrchk(cudaMemsetAsync(m_objGPUInst.d_neighborsDist_query,0,sizeof(float) * (numQueries*(m_objInputData.R+1)), stream));
 
 	// As we know the Medoid is the first parent, lets get started with working extracting its neighbours
 	T* FPSetCoordsList = (T*)m_objHostInst.FPSetCoordsList;
@@ -428,8 +460,8 @@ void BANGSearchInner<T>::bang_init(int numQueries)
 		FPSetCoordsList_Counts[i] = 1;
 	}
 	// Transfer the Medoid (seed parent) default first parent
-	gpuErrchk(cudaMemcpy(m_objGPUInst.d_L2ParentIds, L2ParentIds, sizeof(unsigned) * numQueries, cudaMemcpyHostToDevice ));
-	gpuErrchk(cudaMemcpy(m_objGPUInst.d_FPSetCoordsList_Counts, FPSetCoordsList_Counts, sizeof(unsigned) * numQueries, cudaMemcpyHostToDevice ));
+	gpuErrchk(cudaMemcpyAsync(m_objGPUInst.d_L2ParentIds, L2ParentIds, sizeof(unsigned) * numQueries, cudaMemcpyHostToDevice, stream ));
+	gpuErrchk(cudaMemcpyAsync(m_objGPUInst.d_FPSetCoordsList_Counts, FPSetCoordsList_Counts, sizeof(unsigned) * numQueries, cudaMemcpyHostToDevice, stream ));
 	free(L2ParentIds);
 	free(FPSetCoordsList_Counts);
 
@@ -465,15 +497,15 @@ void BANGSearchInner<T>::bang_init(int numQueries)
 	}
 
 	// 0th row in FPSetCoordsListget copied to GPU in Async fashion
-	cudaMemcpy(d_FPSetCoordsList + ((iter-1) * m_objHostInst.FPSetCoords_rowsize),
+	cudaMemcpyAsync(d_FPSetCoordsList + ((iter-1) * m_objHostInst.FPSetCoords_rowsize),
 					FPSetCoordsList + ((iter-1)* m_objHostInst.FPSetCoords_rowsize),
 					m_objHostInst.FPSetCoords_rowsize_bytes,
-					cudaMemcpyHostToDevice);
+					cudaMemcpyHostToDevice, stream);
 
 
 	// Transfer neighbor IDs and count to GPU
-	gpuErrchk(cudaMemcpy(m_objGPUInst.d_neighbors_temp, m_objHostInst.neighbors, sizeof(unsigned) * numQueries*(m_objInputData.R+1), cudaMemcpyHostToDevice));
-	gpuErrchk(cudaMemcpy(m_objGPUInst.d_numNeighbors_query_temp, m_objHostInst.numNeighbors_query, sizeof(unsigned) * (numQueries), cudaMemcpyHostToDevice));
+	gpuErrchk(cudaMemcpyAsync(m_objGPUInst.d_neighbors_temp, m_objHostInst.neighbors, sizeof(unsigned) * numQueries*(m_objInputData.R+1), cudaMemcpyHostToDevice, stream));
+	gpuErrchk(cudaMemcpyAsync(m_objGPUInst.d_numNeighbors_query_temp, m_objHostInst.numNeighbors_query, sizeof(unsigned) * (numQueries), cudaMemcpyHostToDevice, stream));
 }
 
 template<typename T>
@@ -507,7 +539,7 @@ void BANGSearchInner<T>::bang_free()
 
 
 	cudaStreamDestroy(m_objGPUInst.streamFPTransfers);
-	cudaStreamDestroy(m_objGPUInst.streamKernels);
+	// cudaStreamDestroy(m_objGPUInst.streamKernels);
 	cudaStreamDestroy(m_objGPUInst.streamParent);
 	cudaStreamDestroy(m_objGPUInst.streamChildren);
 
@@ -537,7 +569,7 @@ void BANGSearchInner<T>::bang_set_searchparams(int recall, int worklist_length, 
 }
 
 template<typename T>
-void BANGSearchInner<T>::bang_query(T* queriesFP, int numQueries,
+void BANGSearchInner<T>::bang_query(raft::device_resources handle, T* queriesFP, int numQueries,
 					result_ann_t* nearestNeighbours,
 					float* nearestNeighbours_dist )
 {
@@ -579,7 +611,7 @@ void BANGSearchInner<T>::bang_query(T* queriesFP, int numQueries,
 	auto start = std::chrono::high_resolution_clock::now();
 	#endif
 	// ToDo: Check the Dim of queriesFP == m_objInputData.D, for mips, Dimentionality of queriesFP +1 = m_objInputData.D
-	gpuErrchk(cudaMemcpy(d_queriesFP, queriesFP, sizeof(T) * (m_objInputData.D*numQueries), cudaMemcpyHostToDevice));
+	gpuErrchk(cudaMemcpyAsync(d_queriesFP, queriesFP, sizeof(T) * (m_objInputData.D*numQueries), cudaMemcpyHostToDevice, handle.get_stream()));
 
 #ifdef _TIMERS
 	auto stop = std::chrono::high_resolution_clock::now();
@@ -605,7 +637,7 @@ void BANGSearchInner<T>::bang_query(T* queriesFP, int numQueries,
 	start = std::chrono::high_resolution_clock::now();
 #endif
 
-	gpuErrchk(cudaMemset(m_objGPUInst.d_numNeighbors_query, 0, sizeof(unsigned)*numQueries));
+	gpuErrchk(cudaMemsetAsync(m_objGPUInst.d_numNeighbors_query, 0, sizeof(unsigned)*numQueries, m_objGPUInst.streamKernels));
 
 #ifdef _TIMERS
 	stop = std::chrono::high_resolution_clock::now();
@@ -934,9 +966,9 @@ void BANGSearchInner<T>::bang_query(T* queriesFP, int numQueries,
 #endif
 	// Lets ensure we have received all the FP vectors before starting the Re-ranking.
 	// We need FP vectors to calculate exact distances now. Compressed vectors are not used hereafter
-	cudaStreamSynchronize(m_objGPUInst.streamFPTransfers);
+	// cudaStreamSynchronize(m_objGPUInst.streamFPTransfers);
 
-	compute_L2Dist<<<numQueries, m_objGPUInst.K4_blockSize, m_objInputData.D * sizeof(T) >>> (d_FPSetCoordsList,
+	compute_L2Dist<<<numQueries, m_objGPUInst.K4_blockSize, m_objInputData.D * sizeof(T), m_objGPUInst.streamFPTransfers>>> (d_FPSetCoordsList,
 												m_objGPUInst.d_FPSetCoordsList_Counts,
 												d_queriesFP,
 												m_objGPUInst.d_L2ParentIds,
@@ -947,7 +979,7 @@ void BANGSearchInner<T>::bang_query(T* queriesFP, int numQueries,
 
 
 	// We have the exact distances of each each candidate. Lets pick the topk neighbours.
-	compute_NearestNeighbours<<<numQueries, MAX_PARENTS_PERQUERY >>> (m_objGPUInst.d_L2ParentIds,
+	compute_NearestNeighbours<<<numQueries, MAX_PARENTS_PERQUERY, 0, m_objGPUInst.streamFPTransfers >>> (m_objGPUInst.d_L2ParentIds,
 												m_objGPUInst.d_L2ParentIds_aux,
 												m_objGPUInst.d_FPSetCoordsList_Counts,
 												m_objGPUInst.d_L2distances,
@@ -964,10 +996,10 @@ void BANGSearchInner<T>::bang_query(T* queriesFP, int numQueries,
 
 	start = std::chrono::high_resolution_clock::now();
 #endif
-	gpuErrchk(cudaMemcpy(nearestNeighbours, m_objGPUInst.d_nearestNeighbours, sizeof(result_ann_t) * (m_objSearchParams.recall * numQueries),
-				cudaMemcpyDeviceToHost));
-	gpuErrchk(cudaMemcpy(nearestNeighbours_dist, m_objGPUInst.d_L2distances, sizeof(float) * (m_objSearchParams.recall * numQueries),
-				cudaMemcpyDeviceToHost));
+	gpuErrchk(cudaMemcpyAsync(nearestNeighbours, m_objGPUInst.d_nearestNeighbours, sizeof(result_ann_t) * (m_objSearchParams.recall * numQueries),
+				cudaMemcpyDefault, handle.get_stream()));
+	gpuErrchk(cudaMemcpyAsync(nearestNeighbours_dist, m_objGPUInst.d_L2distances, sizeof(float) * (m_objSearchParams.recall * numQueries),
+				cudaMemcpyDefault, handle.get_stream()));
 
 #ifdef _TIMERS
 	stop = std::chrono::high_resolution_clock::now();
@@ -1025,7 +1057,7 @@ void BANGSearchInner<T>::bang_query(T* queriesFP, int numQueries,
 	unsigned total_size=0;
 	unsigned* FPSetCoordsList_Counts_temp = (unsigned*)malloc(sizeof(unsigned) * numQueries);
 
-	gpuErrchk(cudaMemcpy(FPSetCoordsList_Counts_temp, m_objGPUInst.d_FPSetCoordsList_Counts, sizeof(unsigned) * numQueries, cudaMemcpyDeviceToHost ));
+	gpuErrchk(cudaMemcpyAsync(FPSetCoordsList_Counts_temp, m_objGPUInst.d_FPSetCoordsList_Counts, sizeof(unsigned) * numQueries, cudaMemcpyDeviceToHost ));
 	for (int i=0; i< numQueries; i++)
 	{
 		total_size += FPSetCoordsList_Counts_temp[i];
