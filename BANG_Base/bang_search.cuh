@@ -45,7 +45,7 @@ typedef struct __attribute__((__packed__)) _GraphMedatadata
 	unsigned long long ulluIndexEntryLen;
 	int uDatatype;
 	unsigned uDim; // no of dimensions
-	unsigned uDegree; // no of dimensions
+	unsigned uDegree; // degree bound
 	unsigned uDatasetSize;
 } GraphMedataData; //32 bytes
 
