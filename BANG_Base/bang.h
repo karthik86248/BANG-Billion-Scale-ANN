@@ -68,7 +68,7 @@ class BANGSearch
     * Search can be performed bang_query() .
     *
     * @param[in] query_file Absolute path of the query file in bin format.
-    * @param[in] groundtruth_file Absolute path of the groundtruth file in bin format (generated usign DiskANN).
+    * @param[in] groundtruth_file Absolute path of the groundtruth file in bin format (generated using DiskANN).
     * @param[in] num_queries Number of queries to be used for the search.
     * @param[in] recal_param k-recall@k.
     */

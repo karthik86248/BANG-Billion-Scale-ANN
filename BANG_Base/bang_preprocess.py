@@ -2,13 +2,14 @@ import struct
 import sys
 import numpy
 import numpy as np
-# this script converts the *disk.index (o/p of the DiskANN graph construction) into *disk.bin *metadata.bin files
-
+# This script converts the X_disk.index (o/p of the DiskANN graph construction) into X_disk.bin X_disk_metadata.bin files
+# The  X_disk.bin X_disk_metadata.bin files are the input files needed for BANG seatch.
+#  X_disk.bin is the Graph index (Full Precision Vectors and adjacency list), X_disk_metadata.bin contains some metadata about the graph index like Medoid, chunks.
 
 print("*** Ensure to update the SECTOR LENGTH in the Script (if non-default sector lengths are used during DiskANN graph build)")
 
 if len(sys.argv) != 6:
-    print("Usage :",sys.argv[0],"<path to DiskANN graph index file (.index)> <path to store the o/p pre-process file for use by BANG (.bin)> \
+    print("Usage :",sys.argv[0],"<path to DiskANN graph index file (.index)> <path to store the o/p files for use by BANG Searcg (.bin)> \
 <dataset dimension> <dataset datatype: 0 -> int8, 1 -> uint8, 2 -> float> <degree (i.e. R) of the DiskANN graph index>")
     exit()
 
@@ -23,36 +24,52 @@ w = open(file_to_write,"wb")
 file1_to_write = file_to_write[:len(file_to_write)-4] + "_metadata" + file_to_write[len(file_to_write)-4:] 
 w1 = open(file1_to_write,"wb")
 with open(file_to_read, "rb") as f:
-        a=f.read(8)
-        filesize =struct.unpack('<Q',a)[0]
-        print(filesize)    #filesize
+        # Read the metadata sector
+        a=f.read(4) 
+        a=f.read(4)
 
         a=f.read(8)
         total_nodes =struct.unpack('<Q',a)[0]
-        print(total_nodes)    #No of nodes
+        print("Number of Nodes: ", total_nodes)
 
         a=f.read(8)
-        d =struct.unpack('<Q',a)[0]
-        print("Medoid is : ",d)    #Medoid ID
+        num_dim =struct.unpack('<Q',a)[0]
+        print("Dataset Dimensions: ", num_dim)
+
+        a=f.read(8)
+        medoid =struct.unpack('<Q',a)[0]
+        print("Medoid: ", medoid)
         w1.write(a)
-        
+
         a=f.read(8)
         maxNodeLen =struct.unpack('<Q',a)[0]
-        print(maxNodeLen)    #max_node_len in bytes
+        print("Each node entry length (bytes):", maxNodeLen)    #max_node_len in bytes
         w1.write(a)
-
-        a=f.read(8)
-        nodesPerSec =struct.unpack('<Q',a)[0]
-        print(nodesPerSec)    #nnodes_per_sector
-
 
         w1.write(struct.pack('<I',int(DATATYPE)))
         w1.write(struct.pack('<I',int(DIM)))
         w1.write(struct.pack('<I',int(DEGREE)))
+        
+        a=f.read(8)
+        nodesPerSec =struct.unpack('<Q',a)[0]
+        print("NUmber of node entries per disk sector: ", nodesPerSec)    #nnodes_per_sector
+        
+        #skip some info that we are not interested in
+        a=f.read(8)
+        a=f.read(8)
+        a=f.read(8)
+        
+        # Finally, read, the file size
+        a=f.read(8)
+        filesize =struct.unpack('<Q',a)[0]
+        print("File Size (Bytes); ", filesize)
+
         print("Datatype = ", DATATYPE, "Datatype size =", DATATYPESIZE)
+
+        # Start reading the sectors containing the actual index data
         NodesRead = 0
         # Sectores in file
-        print(int(filesize/SECTORLEN)-1)
+        print("Sectors in File:", int(filesize/SECTORLEN)-1)
         i=0
         offset=0
         for i in range(int(filesize/SECTORLEN)-1):
@@ -64,6 +81,7 @@ with open(file_to_read, "rb") as f:
                 for dim in range(DIM):
                      b=f.read(int(DATATYPESIZE))
                      w.write(b) 
+                #read the degree of the given node
                 a=f.read(4)
                 w.write(a)   
                 d=struct.unpack('<I',a)[0]
