@@ -293,7 +293,7 @@ bool BANGSearchInner<T>::bang_load(char* indexfile_path_prefix)
 	// Loading chunk offsets
 	in1.seekg(pqFileOffsets.pqChunkOffsets_FileOffset+8,std::ios::beg);
 	chunksOffset = (unsigned*) malloc(sizeof(unsigned) * ( m_objInputData.uChunks+1)); 
-	in1.read((char*)chunksOffset,sizeof(unsigned)*m_objInputData.uChunks+1);
+	in1.read((char*)chunksOffset,sizeof(unsigned)*(m_objInputData.uChunks+1));
 	//cout << "Loaded:" <<  chunkOffsets_file << endl;
 
 	in1.close();
