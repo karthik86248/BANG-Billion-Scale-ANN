@@ -25,7 +25,7 @@ BF size is calculated based on how much memory is remaining on GPU
 2) Then start varying the L to generates points towards left and north on the plot
 
 3) define the dataset-specific #define like done below for each dataset below.
-
+ToDo: L will be made as an interactive parameter to avoid re-compilations
 
 4) Discard the first run results as it will be higher (outlier). Take the next 5 runs and
 compute the geomean.
@@ -35,9 +35,9 @@ compute the geomean.
 */
 
 
-#define SIFT1M
-#define L 160 // L_search
-#define CHUNKS 128
+#define SIFT100M
+#define L 40 // L_search
+#define CHUNKS 64
 
 
 
@@ -158,11 +158,49 @@ typedef float datatype_t;
 #endif
 
 
+#ifdef SIFT100M
+
+typedef uint8_t datatype_t;
+#define INDEX_ENTRY_LEN (388)
+
+#define D 128 // dimensions of the data
+
+#define MEDOID 59689614 // 65610822 // 221898 // sift 1B
+#define N 100000000// total number of nodes in the dataset
+#define NUMTHREADS_COMPUTEPARENT 1  // surprisingly, found 1 to work better than 100!
+#endif
+
+
+#ifdef MNIST8M
+
+typedef uint8_t datatype_t;
+#define INDEX_ENTRY_LEN (1044)
+
+#define D 784 // dimensions of the data
+
+#define MEDOID 2096858 // 221898 // sift 1B
+#define N 8090000// total number of nodes in the dataset
+#define NUMTHREADS_COMPUTEPARENT 1  // surprisingly, found 1 to work better than 100!
+#endif
+
+
+#ifdef DEEP100M
+
+typedef float datatype_t;
+#define INDEX_ENTRY_LEN (644)
+
+#define D 96 // dimensions of the data
+
+#define MEDOID 68983084 // 221898 // sift 1B
+#define N 100000000// total number of nodes in the dataset
+#define NUMTHREADS_COMPUTEPARENT 1  // surprisingly, found 1 to work better than 100!
+#endif
+
 
 __global__ void populate_pqDist_par(float *d_pqTable, float* d_pqDistTables, datatype_t* d_queriesFP, unsigned* d_chunksOffset, float* d_centroid, unsigned n_chunks);
 
 
-__global__ void  compute_neighborDist_par(unsigned* d_neighbors, unsigned* d_numNeighbors_query, float*  d_neighborsDist_query, float* d_queriesFP, uint8_t* d_pIndex);
+__global__ void  compute_neighborDist_par(unsigned* d_neighbors, unsigned* d_numNeighbors_query, float*  d_neighborsDist_query, datatype_t* d_queriesFP, uint8_t* d_pIndex);
 
 __global__ void  compute_parent1(unsigned* d_neighbors, unsigned* d_numNeighbors_query, float* d_neighborsDist_query,
 							unsigned* d_BestLSets, float* d_BestLSetsDist, bool* d_BestLSets_visited,
@@ -185,6 +223,24 @@ __global__ void  compute_parent2(unsigned* d_neighbors, unsigned* d_numNeighbors
 __global__ void  compute_BestLSets_par_sort_msort(unsigned* d_neighbors, unsigned* d_neighbors_aux, unsigned* d_neighbors_offset, float* d_neighborsDist_query, float* d_neighborsDist_query_aux,  bool* d_nextIter);
 
 __global__ void  compute_BestLSets_par_merge(unsigned* d_neighbors, unsigned* d_numNeighbors_query, float* d_neighborsDist_query, unsigned* d_BestLSets, float* d_BestLSetsDist,	bool* d_BestLSets_visited, unsigned* d_parents, unsigned iter, bool* d_nextIter, unsigned* d_BestLSets_count, unsigned* d_L2ParentIds, unsigned* d_FPSetCoordsList_Counts, unsigned* d_numQueries);
+
+__global__ void  compute_BestLSets_par_sort_msort_new(unsigned* d_neighbors,
+													//unsigned* d_neighbors_aux,
+													unsigned* d_numNeighbors_query,
+													float* d_neighborsDist_query,
+													//float* d_neighborsDist_query_aux,
+													unsigned* d_BestLSets,
+													float* d_BestLSetsDist,
+													bool* d_BestLSets_visited,
+													unsigned* d_parents,
+													unsigned iter,
+													bool* d_nextIter,
+													unsigned* d_BestLSets_count,
+													unsigned* d_L2ParentIds,
+													unsigned* d_FPSetCoordsList_Counts,
+													unsigned* d_numQueries
+																								
+													);
 
 __global__ void neighbor_filtering_new (unsigned* d_neighbors,
 										unsigned* d_neighbors_temp,
@@ -213,7 +269,8 @@ __global__ void  compute_NearestNeighbours(unsigned* d_L2ParentIds,
 						float* d_L2distances_aux,
 						unsigned* d_nearestNeighbours,
 						unsigned* d_numQueries,
-						unsigned* d_recall);
+						unsigned* d_recall,
+						unsigned* d_BestLSets);
 
 __global__ void  compute_neighborDist_par_cachewarmup(unsigned* d_neighbors,
 											uint8_t* d_compressedVectors);
