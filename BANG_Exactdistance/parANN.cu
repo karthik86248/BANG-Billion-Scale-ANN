@@ -19,9 +19,11 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-
+#include "compute_BestLSets_bitonic.cu"
 #define R 64 // Max. node degree
-
+#ifndef BITONIC_SORT_SIZE
+#define BITONIC_SORT_SIZE 128  // Must be power of 2, >= R+1
+#endif
 //#define OLD_MERGE 
 
 //#define BF 40009ULL   // size of bloom-filter (per query) with 40009 -> 400 MB
@@ -515,6 +517,7 @@ do // this is just to run the entire search multiple runs for consistent stats r
 
 	gputimer.Start();
 	
+cudaMemset(d_nextIter, 0, sizeof(bool));
 
 #ifdef OLD_MERGE
 	/** [8] Launching the kernel with "numQueries" number of thread-blocks and (R+1) block size.
@@ -548,21 +551,21 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	 								d_numQueries);
 #else
 
-	compute_BestLSets_par_sort_msort_new<<<numQueries, max(numThreads_K3,numThreads_K3_merge),0, streamKernels >>>(d_neighbors,
-															//d_neighbors_aux,
-															d_numNeighbors_query,
-															d_neighborsDist_query,
-															//d_neighborsDist_query_aux,
-															d_BestLSets,
-															d_BestLSetsDist,
-															d_BestLSets_visited,
-															d_parents,
-															iter,
-															d_nextIter,
-															d_BestLSets_count,
-															d_L2ParentIds,
-															d_FPSetCoordsList_Counts,
-															d_numQueries);
+	
+    compute_BestLSets_bitonic<<<numQueries, 128, 0, streamKernels>>>(
+    d_neighbors,
+    d_numNeighbors_query,
+    d_neighborsDist_query,
+    d_BestLSets,
+    d_BestLSetsDist,
+    d_BestLSets_visited,
+    d_parents,
+    iter,
+    d_nextIter,
+    d_BestLSets_count,
+    d_L2ParentIds,
+    d_FPSetCoordsList_Counts,
+    d_numQueries);
 
 													
 
@@ -575,6 +578,7 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	{
 		//printf("Start of iter %d\n", iter);
 		gputimer.Start();
+		
 
 		++iter;
 		gpuErrchk(cudaMemset(d_numNeighbors_query, 0, sizeof(unsigned)*numQueries));
@@ -609,6 +613,7 @@ do // this is just to run the entire search multiple runs for consistent stats r
 		
 
 		gputimer.Start();
+        cudaMemset(d_nextIter, 0, sizeof(bool));
 
 #ifdef OLD_MERGE
 		/** [8] Launching the kernel with "numQueries" number of thread-blocks and (R+1) block size.
@@ -640,22 +645,21 @@ do // this is just to run the entire search multiple runs for consistent stats r
 		 								d_FPSetCoordsList_Counts,
 		 								d_numQueries);
 #else
-		compute_BestLSets_par_sort_msort_new<<<numQueries, max(numThreads_K3,numThreads_K3_merge),0, streamKernels >>>(d_neighbors,
-															//d_neighbors_aux,
-															d_numNeighbors_query,
-															d_neighborsDist_query,
-															//d_neighborsDist_query_aux,
-															d_BestLSets,
-															d_BestLSetsDist,
-															d_BestLSets_visited,
-															d_parents,
-															iter,
-															d_nextIter,
-															d_BestLSets_count,
-															d_L2ParentIds,
-															d_FPSetCoordsList_Counts,
-															d_numQueries
-															);
+		
+
+	compute_BestLSets_bitonic<<<numQueries, 128, 0, streamKernels>>>(d_neighbors,
+    d_numNeighbors_query,
+    d_neighborsDist_query,
+    d_BestLSets,
+    d_BestLSetsDist,
+    d_BestLSets_visited,
+    d_parents,
+    iter,
+    d_nextIter,
+    d_BestLSets_count,
+    d_L2ParentIds,
+    d_FPSetCoordsList_Counts,
+    d_numQueries);
 
 													
 #endif
@@ -1179,7 +1183,62 @@ __global__ void  compute_neighborDist_par(unsigned* d_neighbors,
 }
 
 
-
+// __global__ void compute_neighborDist_par(
+//     unsigned* __restrict__ d_neighbors,
+//     unsigned* __restrict__ d_numNeighbors_query,
+//     float* __restrict__ d_neighborsDist_query,
+//     datatype_t* __restrict__ d_queriesFP,
+//     uint8_t* __restrict__ d_pIndex) 
+// {
+//     unsigned tid = threadIdx.x;
+//     unsigned queryID = blockIdx.x;
+    
+//     // Load query vector into shared memory ONCE
+//     __shared__ float shm_query[D];
+//     datatype_t* d_queriesFP_start = d_queriesFP + (queryID * D);
+    
+//     // Coalesced load of query vector
+//     for (unsigned i = tid; i < D; i += blockDim.x) {
+//         shm_query[i] = (float)d_queriesFP_start[i];
+//     }
+//     __syncthreads();
+    
+//     unsigned numNeighbors = d_numNeighbors_query[queryID];
+//     if (numNeighbors == 0) return;
+    
+//     unsigned queryNeighbors_start = queryID * (R + 1);
+    
+//     // Tuned for D=128: use 32 threads per neighbor (full warp)
+//     #define THREADS_PER_NEIGHBOR 32
+//     typedef cub::WarpReduce<float> WarpReduce;
+//     __shared__ typename WarpReduce::TempStorage temp_storage[R + 1];
+    
+//     unsigned warpId = tid / THREADS_PER_NEIGHBOR;
+//     unsigned laneId = tid % THREADS_PER_NEIGHBOR;
+//     unsigned numWarps = blockDim.x / THREADS_PER_NEIGHBOR;
+    
+//     for (unsigned j = warpId; j < numNeighbors; j += numWarps) {
+//         unsigned myNeighbor = d_neighbors[queryNeighbors_start + j];
+//         datatype_t* pBase = (datatype_t*)(d_pIndex + ((unsigned long long)myNeighbor * INDEX_ENTRY_LEN));
+        
+//         float sum = 0.0f;
+        
+//         // Each thread in warp handles D/32 = 4 elements
+//         #pragma unroll 4
+//         for (unsigned i = laneId; i < D; i += THREADS_PER_NEIGHBOR) {
+//             float val = (float)pBase[i];
+//             float diff = val - shm_query[i];
+//             sum += diff * diff;
+//         }
+        
+//         // Warp-level reduction
+//         float dist = WarpReduce(temp_storage[j % (R+1)]).Sum(sum);
+        
+//         if (laneId == 0) {
+//             d_neighborsDist_query[queryNeighbors_start + j] = dist;
+//         }
+//     }
+// }
 __global__ void compute_L2Dist (datatype_t* d_FPSetCoordsList,
 								unsigned* d_FPSetCoordsList_Counts,
 								datatype_t* d_queriesFP,
@@ -1494,205 +1553,7 @@ __global__ void  compute_BestLSets_par_merge(unsigned* d_neighbors,
 	}
 
 }
-#else
 
-__global__ void  compute_BestLSets_par_sort_msort_new(unsigned* d_neighbors,
-													//unsigned* d_neighbors_aux,
-													unsigned* d_numNeighbors_query,
-													float* d_neighborsDist_query,
-													//float* d_neighborsDist_query_aux,
-													unsigned* d_BestLSets,
-													float* d_BestLSetsDist,
-													bool* d_BestLSets_visited,
-													unsigned* d_parents,
-													unsigned iter,
-													bool* d_nextIter,
-													unsigned* d_BestLSets_count,
-													unsigned* d_L2ParentIds,
-													unsigned* d_FPSetCoordsList_Counts,
-													unsigned* d_numQueries													
-													) {
-	unsigned tid = threadIdx.x;
-    unsigned queryID = blockIdx.x;
-    unsigned numNeighbors = d_numNeighbors_query[queryID];
-    *d_nextIter = false;
-
-    __shared__ unsigned shm_pos[R+1];
-    unsigned offset = queryID*(R+1);	// Offset into d_neighborsDist_query, shm_neighborsDist_query_aux, d_neighbors_aux and d_neighbors arrays
-
-	__shared__ float shm_neighborsDist_query_aux[R+1];
-	__shared__ unsigned shm_neighbors_aux[R+1];
-
-
-	__shared__ float shm_neighborsDist_query[R]; // R+1 is an upperbound on the number of neighbors
-	__shared__ float shm_currBestLSetsDist[L];
-	__shared__ float shm_BestLSetsDist[L];
-	__shared__ unsigned shm_pos1[R+L+1];
-	__shared__ unsigned shm_BestLSets[L];
-	__shared__ bool shm_BestLSets_visited[L];
-	__shared__ unsigned Temp;
-	
-	// perform parallel merge sort
-	for(unsigned subArraySize=2; subArraySize< 2*numNeighbors; subArraySize *= 2){
-		unsigned subArrayID = tid/subArraySize;
-		unsigned start = subArrayID * subArraySize;
-		unsigned mid = min(start + subArraySize/2, numNeighbors);
-		unsigned end = min(start + subArraySize, numNeighbors);
-
-		if(tid >= start && tid < mid){
-			unsigned lowerBound = lower_bound_d(&d_neighborsDist_query[offset + mid], 0, end-mid, d_neighborsDist_query[offset + tid]);
-			shm_pos[tid] = lowerBound + tid;	// Position for this element
-		}
-
-		if(tid >= mid && tid < end)  {
-			unsigned upperBound = upper_bound_d(&d_neighborsDist_query[offset + start], 0, mid-start, d_neighborsDist_query[offset + tid]);
-			shm_pos[tid] = start + (upperBound + tid-mid);	// Position for this element
-
-		}
-		__syncthreads();
-		__threadfence_block();
-
-		// Copy the neighbors to auxiliary array at their correct position
-		for(int i=tid; i < numNeighbors; i += blockDim.x) {
-			shm_neighborsDist_query_aux[ shm_pos[i]] = d_neighborsDist_query[offset+i];
-			shm_neighbors_aux[shm_pos[i]] = d_neighbors[offset+i];
-		}
-		__syncthreads();
-		#if 1
-		// Copy the auxiliary array to original array
-		for(int i=tid; i < numNeighbors; i += blockDim.x) {
-			d_neighborsDist_query[offset + i] = shm_neighborsDist_query_aux[i];
-			d_neighbors[offset + i] = shm_neighbors_aux[i];
-		}
-		__syncthreads();
-		#endif
-	}
-	//}
-	//{
-	__syncthreads();
-	#if 1
-	for(int i=tid; i < numNeighbors; i += blockDim.x) {
-			shm_neighborsDist_query_aux[i] = d_neighborsDist_query[offset + i];
-			shm_neighbors_aux[i] = d_neighbors[offset + i];
-		}
-	__syncthreads();
-	//unsigned queryID = blockIdx.x;
-	//unsigned numNeighbors = d_numNeighbors_query[queryID];
-	//unsigned tid = threadIdx.x;
-
-	 unsigned Best_L_Set_size  ;// = 0;
-	 unsigned newBest_L_Set_size ; //= d_BestLSets_count[queryID];
-	 __shared__ unsigned nbrsBound;
-	//unsigned offset = queryID*(R+1);
-	//unsigned numQueries = *d_numQueries;
-
-
-	if(numNeighbors > 0){	// If the number of neighbors after filteration is zero then no sense of merging
-
-        if(iter==1){	// If this is the first call to compute_BestLSets_par_merge by this query then initialize d_BestLSets, d_BestLSetsDist...
-                nbrsBound = min(numNeighbors,L);
-                for(unsigned ii=tid; ii < nbrsBound; ii += blockDim.x) {
-                        unsigned nbr =  shm_neighbors_aux[ ii];
-                        d_BestLSets[queryID*L + tid] = nbr;
-                        d_BestLSetsDist[queryID*L + tid] =   shm_neighborsDist_query_aux[ ii];
-                        d_BestLSets_visited[queryID*L + tid] = ( nbr == MEDOID);
-                }
-                __syncthreads();
-                newBest_L_Set_size = nbrsBound;
-                d_BestLSets_count[queryID] = nbrsBound;
-        }
-        else {
-                Best_L_Set_size = d_BestLSets_count[queryID];
-
-                float maxBestLSetDist = d_BestLSetsDist[L*queryID+Best_L_Set_size-1];
-				Temp = min(L,numNeighbors);
-				if (tid == 0) {
-                for(nbrsBound = 0; nbrsBound < Temp ; ++nbrsBound) {
-                        if(shm_neighborsDist_query_aux[ nbrsBound] >= maxBestLSetDist){
-                                break;
-                        }
-                }
-				}
-				__syncthreads();
-
-                nbrsBound = max(nbrsBound, min(L-Best_L_Set_size, numNeighbors));	//Added by saim
-                // if both Best_L_Set_size and numNeighbors is less than L, then the max of the two will be the newBest_L_Set_size otherwise it will be L
-                newBest_L_Set_size = min(Best_L_Set_size + nbrsBound, L);			//Updated by saim
-
-                d_BestLSets_count[queryID] = newBest_L_Set_size;
-
-
-			/*perform parallel merge */
-               /* for(int i=tid; i < nbrsBound; i += blockDim.x) {
-                        shm_neighborsDist_query[i] = shm_neighborsDist_query_aux[ i];
-                }*/
-                for(int i=tid; i < Best_L_Set_size; i += blockDim.x) {
-                        shm_currBestLSetsDist[i] = d_BestLSetsDist[L*queryID+i];
-                }
-                __syncthreads();
-                if(tid < nbrsBound) {
-                        shm_pos1[tid] =  lower_bound_d(shm_currBestLSetsDist, 0, Best_L_Set_size, shm_neighborsDist_query_aux[tid]) + tid;
-                }
-                if( tid >= nbrsBound && tid < (nbrsBound + Best_L_Set_size)) {
-                        shm_pos1[tid] =  upper_bound_d(shm_neighborsDist_query_aux, 0, nbrsBound, shm_currBestLSetsDist[tid-nbrsBound]) + (tid-nbrsBound);
-                }
-
-                __syncthreads();
-                __threadfence_block();
-
-                // all threads of the block have populated the positions array in shared memory
-                if(tid < nbrsBound && shm_pos1[tid] < newBest_L_Set_size)  {
-                        shm_BestLSetsDist[shm_pos1[tid]] = shm_neighborsDist_query_aux[tid];
-                        shm_BestLSets[shm_pos1[tid]] = shm_neighbors_aux[tid];
-                        shm_BestLSets_visited[shm_pos1[tid]] = false;
-                }
-				Temp = (nbrsBound + Best_L_Set_size);
-                if(tid >= nbrsBound && tid < (Temp) && shm_pos1[tid] < newBest_L_Set_size) {
-                        shm_BestLSetsDist[shm_pos1[tid]] = shm_currBestLSetsDist[tid-nbrsBound];
-                        shm_BestLSets[shm_pos1[tid]] = d_BestLSets[queryID*L+(tid-nbrsBound)];
-                        shm_BestLSets_visited[shm_pos1[tid]] = d_BestLSets_visited[queryID*L+(tid-nbrsBound)];
-                }
-                __syncthreads();
-                __threadfence_block();
-
-                //Copying back from shared memory to device array
-                if (tid < newBest_L_Set_size) {
-                        d_BestLSetsDist[L*queryID+tid] = shm_BestLSetsDist[tid];
-                        d_BestLSets[L*queryID+tid] = shm_BestLSets[tid];
-                        d_BestLSets_visited[L*queryID+tid] = shm_BestLSets_visited[tid];
-                    }
-                __syncthreads();
-                //__threadfence_block();
-        }
-	}
-
-	if(tid == 0) {
-			unsigned parentIndex = 0;
-			for(unsigned ii=0; ii < newBest_L_Set_size; ++ii) {
-				if(!d_BestLSets_visited[L*queryID + ii]) 
-				{
-					parentIndex++;
-					d_BestLSets_visited[L*queryID + ii] = true;
-					d_parents[queryID*(SIZEPARENTLIST)] = parentIndex;
-					d_parents[queryID*(SIZEPARENTLIST)+parentIndex] = d_BestLSets[L*queryID + ii];
-					*d_nextIter = true;
-					break;
-				}
-			}
-			#if 0
-			d_parents[queryID*(SIZEPARENTLIST)] = parentIndex;
-			if(parentIndex != 0) // parentIndex == 0 is the termination condition for the algorithm.
-				{
-					*d_nextIter = true;
-					// Note: One thread assigned to one Query, so ok to increment (no contention)
-					//d_FPSetCoordsList_Counts[queryID]++;
-					// ToDo : Ensure to put MEDOID as the first parent
-					//d_L2ParentIds[(iter * numQueries) + queryID] = d_parents[queryID*(SIZEPARENTLIST)+parentIndex];
-				}
-			#endif
-	}
-#endif
-}
 
 
 #endif
