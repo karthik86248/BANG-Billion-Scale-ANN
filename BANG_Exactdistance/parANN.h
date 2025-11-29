@@ -39,7 +39,9 @@ compute the geomean.
 #define L 40 // L_search
 #define CHUNKS 64
 
-
+// #define DEEP100M
+// #define L 40
+// #define CHUNKS 96
 
 
 #ifdef DEEP1BSMALL
@@ -196,11 +198,46 @@ typedef float datatype_t;
 #define NUMTHREADS_COMPUTEPARENT 1  // surprisingly, found 1 to work better than 100!
 #endif
 
+__global__ void compute_BestLSets_bitonic(
+    unsigned* d_neighbors,
+    unsigned* d_numNeighbors_query,
+    float* d_neighborsDist_query,
+    unsigned* d_BestLSets,
+    float* d_BestLSetsDist,
+    bool* d_BestLSets_visited,
+    unsigned* d_parents,
+    unsigned iter,
+    bool* d_nextIter,
+    unsigned* d_BestLSets_count,
+    unsigned* d_L2ParentIds,
+    unsigned* d_FPSetCoordsList_Counts,
+    unsigned* d_numQueries);
+
+__global__ void compute_BestLSets_bitonic_warp(
+    unsigned* d_neighbors,
+    unsigned* d_numNeighbors_query,
+    float* d_neighborsDist_query,
+    unsigned* d_BestLSets,
+    float* d_BestLSetsDist,
+    bool* d_BestLSets_visited,
+    unsigned* d_parents,
+    unsigned iter,
+    bool* d_nextIter,
+    unsigned* d_BestLSets_count,
+    unsigned* d_L2ParentIds,
+    unsigned* d_FPSetCoordsList_Counts,
+    unsigned* d_numQueries);
+
 
 __global__ void populate_pqDist_par(float *d_pqTable, float* d_pqDistTables, datatype_t* d_queriesFP, unsigned* d_chunksOffset, float* d_centroid, unsigned n_chunks);
 
 
-__global__ void  compute_neighborDist_par(unsigned* d_neighbors, unsigned* d_numNeighbors_query, float*  d_neighborsDist_query, datatype_t* d_queriesFP, uint8_t* d_pIndex);
+// line ~203 in parANN.h
+__global__ void compute_neighborDist_par(unsigned* d_neighbors,
+                                         unsigned* d_numNeighbors_query,
+                                         float*  d_neighborsDist_query,
+                                         datatype_t* d_queriesFP,
+                                         uint8_t* d_pIndex);
 
 __global__ void  compute_parent1(unsigned* d_neighbors, unsigned* d_numNeighbors_query, float* d_neighborsDist_query,
 							unsigned* d_BestLSets, float* d_BestLSetsDist, bool* d_BestLSets_visited,
