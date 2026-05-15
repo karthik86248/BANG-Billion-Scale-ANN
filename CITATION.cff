@@ -1,0 +1,91 @@
+cff-version: 1.2.0
+
+message: >-
+  If you use BANG in your research, experiments, benchmarks,
+  or derivative implementations, please cite the paper below.
+
+title: "BANG: Billion-Scale Approximate Nearest Neighbour Search Using a Single GPU"
+
+type: software
+
+authors:
+  - family-names: "Venkatasubba"
+    given-names: "Karthik"
+
+  - family-names: "Khan"
+    given-names: "Saim"
+
+  - family-names: "Singh"
+    given-names: "Somesh"
+
+  - family-names: "Simhadri"
+    given-names: "Harsha Vardhan"
+
+  - family-names: "Vedurada"
+    given-names: "Jyothi"
+
+repository-code: "https://github.com/karthik86248/BANG-Billion-Scale-ANN"
+
+url: "https://github.com/karthik86248/BANG-Billion-Scale-ANN"
+
+repository-artifact: "https://github.com/karthik86248/BANG-Billion-Scale-ANN"
+
+license: "Apache"
+
+keywords:
+  - Approximate Nearest Neighbour Search
+  - ANN
+  - ANNS
+  - GPU
+  - CUDA
+  - Billion-scale search
+  - Vector search
+  - Graph-based ANNS
+  - High-performance computing
+  - Similarity search
+
+abstract: >-
+  BANG is a GPU-based billion-scale approximate nearest neighbour
+  search system that enables graph-based ANNS on datasets that do
+  not entirely fit in GPU memory. The system leverages compressed
+  representations on GPU, host-resident graph traversal, and
+  overlapping communication/computation pipelines for efficient
+  large-scale search.
+
+preferred-citation:
+  type: article
+
+  title: "BANG: Billion-Scale Approximate Nearest Neighbour Search Using a Single GPU"
+
+  authors:
+    - family-names: "Venkatasubba"
+      given-names: "Karthik"
+
+    - family-names: "Khan"
+      given-names: "Saim"
+
+    - family-names: "Singh"
+      given-names: "Somesh"
+
+    - family-names: "Simhadri"
+      given-names: "Harsha Vardhan"
+
+    - family-names: "Vedurada"
+      given-names: "Jyothi"
+
+  journal: "IEEE Transactions on Big Data"
+
+  year: 2025
+
+  volume: 11
+
+  issue: 6
+
+  start: 3142
+  end: 3157
+
+  doi: "10.1109/TBDATA.2025.3581085"
+
+  url: "https://doi.ieeecomputersociety.org/10.1109/TBDATA.2025.3581085"
+
+  publisher: "IEEE Computer Society"
