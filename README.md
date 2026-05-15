@@ -89,6 +89,7 @@ number={06},
 pages={3142-3157},
 doi={10.1109/TBDATA.2025.3581085}
 }
+```
 
 ## Attribution and Community Implementations
 
