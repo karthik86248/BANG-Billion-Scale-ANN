@@ -74,3 +74,28 @@ An example is shown below:
 A note on the cost analysis (CapEx+Opex) is uploaded to the root directory.
 
 
+## Citation
+
+If you use BANG in your research or derivative implementations, please cite:
+
+```bibtex
+@ARTICLE{11045134,
+author={Venkatasubba, Karthik and Khan, Saim and Singh, Somesh and Simhadri, Harsha Vardhan and Vedurada, Jyothi},
+journal={IEEE Transactions on Big Data},
+title={{BANG: Billion-Scale Approximate Nearest Neighbour Search Using a Single GPU}},
+year={2025},
+volume={11},
+number={06},
+pages={3142-3157},
+doi={10.1109/TBDATA.2025.3581085}
+}
+
+## Attribution and Community Implementations
+
+Research, educational, and experimental implementations inspired by BANG are welcome.
+
+If your work derives from this project or paper, please:
+
+- Cite the BANG paper and repository
+- Clearly distinguish your implementation from the official BANG implementation
+- Mention modifications or extensions introduced in your work
