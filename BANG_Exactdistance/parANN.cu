@@ -19,16 +19,18 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-
+#include "fused_kernal.cu"
 #define R 64 // Max. node degree
-
+#ifndef BITONIC_SORT_SIZE
+#define BITONIC_SORT_SIZE 64  // Must be power of 2, >= R+1
+#endif
 //#define OLD_MERGE 
 
 //#define BF 40009ULL   // size of bloom-filter (per query) with 40009 -> 400 MB
 // 4 GB worth of BF, // we have 4 GB headroom in GPU ,
 // could be varied for varying recall/QPS in plots (apart from L, L is the typically varied for plots)
 #define BF_ENTRIES 399887U   	 // per query, max entries in BF, (prime number)
-const unsigned BF_MEMORY = (BF_ENTRIES & 0xFFFFFFFC) + sizeof(unsigned); // 4-byte mem aligned size for actual allocation
+//const unsigned BF_MEMORY = (BF_ENTRIES & 0xFFFFFFFC) + sizeof(unsigned); // 4-byte mem aligned size for actual allocation
 
 
 //#define _DBG
@@ -484,210 +486,82 @@ do // this is just to run the entire search multiple runs for consistent stats r
 	time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
 	
 	gputimer.Start();
-	gpuErrchk(cudaMemset(d_numNeighbors_query, 0, sizeof(unsigned)*numQueries));
-	/** [4] Launching the kernel with "numQueries" number of thread-blocks and block size of 256
-	 * One thread block is assigned to a query, i.e., 256 threads perform the computation for a query. The block size has been tuned for performance.
-	 */
-	 // ToDo: 256 or R
-	neighbor_filtering_new<<<numQueries, numThreads_K5, 0, streamKernels >>> (d_neighbors, d_neighbors_temp, d_numNeighbors_query, d_numNeighbors_query_temp, d_processed_bit_vec, d_parents, d_pIndex, iter, d_nextIter);
-	gputimer.Stop();
-	time_neighbor_filtering += gputimer.Elapsed() ;
 	unsigned int bang_counter = 0;
-	unsigned int* bang_counter_tmp = (unsigned*)malloc(sizeof(unsigned) * numQueries);
-	gpuErrchk(cudaMemcpy(bang_counter_tmp, d_numNeighbors_query, sizeof(unsigned) * numQueries, cudaMemcpyDeviceToHost ));
+unsigned int* bang_counter_tmp = (unsigned*)malloc(sizeof(unsigned) * numQueries);
 
-	for (int i=0; i< numQueries; i++)
-	{
-		bang_counter += bang_counter_tmp[i];
-	}
+// Reset flags
+gpuErrchk(cudaMemset(d_numNeighbors_query, 0, sizeof(unsigned)*numQueries));
+gpuErrchk(cudaMemset(d_nextIter, 0, sizeof(bool)));
 
-	gputimer.Start();
+// FUSED KERNEL - replaces 3 separate kernels
+fused_search_kernel<<<numQueries, 128, 0, streamKernels>>>(
+    d_pIndex,
+    d_queriesFP,
+    d_processed_bit_vec,
+    d_parents,
+    d_BestLSets,
+    d_BestLSetsDist,
+    d_BestLSets_visited,
+    d_BestLSets_count,
+    iter,
+    d_nextIter,
+    d_numNeighbors_query  // Can pass NULL after debugging
+);
 
-	/** [5] Launching the kernel with "numQueries" number of thread-blocks and user specified "numThreads_K2" block size.
-	 * One thread block is assigned to a query, i.e., "numThreads_K2" threads perform the computation for a query.
-	 */
+gputimer.Stop();
+time_B1_vec.push_back(gputimer.Elapsed());  // Track as combined time
 
-	compute_neighborDist_par <<<numQueries, numThreads_K2,0, streamKernels >>> (d_neighbors, d_numNeighbors_query, d_neighborsDist_query, d_queriesFP, d_pIndex);
-	// [7] Compute distance of MEDOID to Query Points
-	gputimer.Stop();
-	time_B1_vec.push_back(gputimer.Elapsed());
-
-
-	gputimer.Start();
-	
-
-#ifdef OLD_MERGE
-	/** [8] Launching the kernel with "numQueries" number of thread-blocks and (R+1) block size.
-	 * One thread block is assigned to a query, i.e., (R+1) threads perform the computation for a query.
-	 * The kernel  sorts an array of size (R+1) per query, so we do not require (R+1) threads per query.
-	 */
-	compute_BestLSets_par_sort_msort<<<numQueries, numThreads_K3,0, streamKernels >>>(d_neighbors,
-														d_neighbors_aux,
-														d_numNeighbors_query,
-														d_neighborsDist_query,
-														d_neighborsDist_query_aux,
-														d_nextIter);
-
-	/** [9] Launching the kernel with "numQueries" number of thread-blocks and (2*L) block size.
-	 * One thread block is assigned to a query, i.e., (2*L) threads perform the computation for a query.
-	 * The kernel merges, for every query, two arrays each of whose sizes are upperbounded by L, so we do not require more than 2*L threads per query.
-	 */
-
-	compute_BestLSets_par_merge<<<numQueries, numThreads_K3_merge,0, streamKernels >>>(d_neighbors,
-									d_numNeighbors_query,
-									d_neighborsDist_query,
-									d_BestLSets,
-									d_BestLSetsDist,
-									d_BestLSets_visited,
-									d_parents,
-									iter,
-									d_nextIter,
-									d_BestLSets_count,
-	 								d_L2ParentIds,
-	 								d_FPSetCoordsList_Counts,
-	 								d_numQueries);
-#else
-
-	compute_BestLSets_par_sort_msort_new<<<numQueries, max(numThreads_K3,numThreads_K3_merge),0, streamKernels >>>(d_neighbors,
-															//d_neighbors_aux,
-															d_numNeighbors_query,
-															d_neighborsDist_query,
-															//d_neighborsDist_query_aux,
-															d_BestLSets,
-															d_BestLSetsDist,
-															d_BestLSets_visited,
-															d_parents,
-															iter,
-															d_nextIter,
-															d_BestLSets_count,
-															d_L2ParentIds,
-															d_FPSetCoordsList_Counts,
-															d_numQueries);
-
-													
-
-#endif
-	gputimer.Stop();
-	time_B2_vec.push_back(gputimer.Elapsed());	
+// Statistics collection (keep this if you need bang_counter)
+gpuErrchk(cudaMemcpy(bang_counter_tmp, d_numNeighbors_query, sizeof(unsigned) * numQueries, cudaMemcpyDeviceToHost));
+for (int i = 0; i < numQueries; i++) {
+    bang_counter += bang_counter_tmp[i];
+}	
 
 	// Loop until all the query have no new parent
-	do
-	{
-		//printf("Start of iter %d\n", iter);
-		gputimer.Start();
-
-		++iter;
-		gpuErrchk(cudaMemset(d_numNeighbors_query, 0, sizeof(unsigned)*numQueries));
-		/** [11] Launching the kernel with "numQueries" number of thread-blocks and block size of 256
-		 * One thread block is assigned to a query, i.e., 256 threads perform the computation for a query. The block size has been tuned for performance.
-		 */
-		neighbor_filtering_new<<<numQueries, numThreads_K5,0, streamKernels >>> (d_neighbors,
-																		d_neighbors_temp,
-																		d_numNeighbors_query,
-																		d_numNeighbors_query_temp,
-																		d_processed_bit_vec,
-																		d_parents,
-																		d_pIndex,
-																		iter,
-																		d_nextIter);
-		gputimer.Stop();
-		time_neighbor_filtering += gputimer.Elapsed() ;
-
-		gpuErrchk(cudaMemcpy(bang_counter_tmp, d_numNeighbors_query, sizeof(unsigned) * numQueries, cudaMemcpyDeviceToHost ));
-		for (int i=0; i< numQueries; i++)
-		{
-			bang_counter += bang_counter_tmp[i];
-		}
-
-		gputimer.Start();
-
-
-		compute_neighborDist_par <<<numQueries, numThreads_K2,0, streamKernels >>> (d_neighbors, d_numNeighbors_query, d_neighborsDist_query, d_queriesFP, d_pIndex);
-
-		gputimer.Stop();
-		time_B1_vec.push_back(gputimer.Elapsed());
-		
-
-		gputimer.Start();
-
-#ifdef OLD_MERGE
-		/** [8] Launching the kernel with "numQueries" number of thread-blocks and (R+1) block size.
-		 * One thread block is assigned to a query, i.e., (R+1) threads perform the computation for a query.
-		 * The kernel  sorts an array of size (R+1) per query, so we do not require (R+1) threads per query.
-		 */
-		compute_BestLSets_par_sort_msort<<<numQueries, numThreads_K3,0, streamKernels >>>(d_neighbors,
-															d_neighbors_aux,
-															d_numNeighbors_query,
-															d_neighborsDist_query,
-															d_neighborsDist_query_aux,
-															d_nextIter);
-
-		/** [9] Launching the kernel with "numQueries" number of thread-blocks and (2*L) block size.
-		 * One thread block is assigned to a query, i.e., (2*L) threads perform the computation for a query.
-		 * The kernel merges, for every query, two arrays each of whose sizes are upperbounded by L, so we do not require more than 2*L threads per query.
-		 */
-		compute_BestLSets_par_merge<<<numQueries, numThreads_K3_merge,0, streamKernels >>>(d_neighbors,
-										d_numNeighbors_query,
-										d_neighborsDist_query,
-										d_BestLSets,
-										d_BestLSetsDist,
-										d_BestLSets_visited,
-										d_parents,
-										iter,
-										d_nextIter,
-										d_BestLSets_count,
-		 								d_L2ParentIds,
-		 								d_FPSetCoordsList_Counts,
-		 								d_numQueries);
-#else
-		compute_BestLSets_par_sort_msort_new<<<numQueries, max(numThreads_K3,numThreads_K3_merge),0, streamKernels >>>(d_neighbors,
-															//d_neighbors_aux,
-															d_numNeighbors_query,
-															d_neighborsDist_query,
-															//d_neighborsDist_query_aux,
-															d_BestLSets,
-															d_BestLSetsDist,
-															d_BestLSets_visited,
-															d_parents,
-															iter,
-															d_nextIter,
-															d_BestLSets_count,
-															d_L2ParentIds,
-															d_FPSetCoordsList_Counts,
-															d_numQueries
-															);
-
-													
-#endif
-
-		gputimer.Stop();
-		time_B2_vec.push_back(gputimer.Elapsed());
-
-		//printf("here\n%d\n",nextIter);
-		start = std::chrono::high_resolution_clock::now();
-
-		gpuErrchk(cudaMemcpy(&nextIter, d_nextIter, sizeof(bool), cudaMemcpyDeviceToHost));  //d_nextIter calculated in compute_parent<<< >>>
-		// Note: Default Stream operations (cmputation or memory transfers) cannot overlap with operatiosn on other sterrams.
-		// Hence, the above call could act as a synchronization mechanism to ensure all kernels are done (next parent ready)
-		// before we start seeking neighbours on CPU
-
-	        // printf("Iteration = %d\n", iter);
-
-
-		stop = std::chrono::high_resolution_clock::now();
-		time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
-
-		//#ifdef _DBG
-		if (iter == MAX_PARENTS_PERQUERY-1)
-		{
-			printf("Error: Iterations crossed the assumed limit. FPSetCoords size oversun \n");
-			break;
-		}
-		//#endif
-
-		//printf("end of iter %d\n", iter);
-	}
-	while(nextIter);
+	do {
+    gputimer.Start();
+    ++iter;
+    
+    // Reset flags
+    gpuErrchk(cudaMemset(d_numNeighbors_query, 0, sizeof(unsigned)*numQueries));
+    gpuErrchk(cudaMemset(d_nextIter, 0, sizeof(bool)));
+    
+    // FUSED KERNEL
+    fused_search_kernel<<<numQueries, 128, 0, streamKernels>>>(
+        d_pIndex,
+        d_queriesFP,
+        d_processed_bit_vec,
+        d_parents,
+        d_BestLSets,
+        d_BestLSetsDist,
+        d_BestLSets_visited,
+        d_BestLSets_count,
+        iter,
+        d_nextIter,
+        d_numNeighbors_query
+    );
+    
+    gputimer.Stop();
+    time_B1_vec.push_back(gputimer.Elapsed());
+    
+    // Statistics
+    gpuErrchk(cudaMemcpy(bang_counter_tmp, d_numNeighbors_query, sizeof(unsigned) * numQueries, cudaMemcpyDeviceToHost));
+    for (int i = 0; i < numQueries; i++) {
+        bang_counter += bang_counter_tmp[i];
+    }
+    
+    // Check if we need another iteration
+    start = std::chrono::high_resolution_clock::now();
+    gpuErrchk(cudaMemcpy(&nextIter, d_nextIter, sizeof(bool), cudaMemcpyDeviceToHost));
+    stop = std::chrono::high_resolution_clock::now();
+    time_transfer += std::chrono::duration_cast<std::chrono::nanoseconds>(stop-start).count() / 1000.0;
+    
+    if (iter == MAX_PARENTS_PERQUERY - 1) {
+        printf("Error: Iterations crossed the assumed limit.\n");
+        break;
+    }
+}
+while(nextIter);
 
 #ifdef _DBG1
 	fileParents.close();
@@ -874,43 +748,45 @@ do // this is just to run the entire search multiple runs for consistent stats r
 
 	cout << "iterations = " <<  iter << endl;
 
-	assert(time_B1_vec.size() >= 1);
-	float time_B1_avg = time_B1_vec[0];
-	time_B1 = time_B1_avg ;
- 	for(unsigned idx=1; idx<time_B1_vec.size(); ++idx) {
-		time_B1_avg = time_B1_avg + (time_B1_vec[idx] - time_B1_avg)/(idx+1); // running average
-		time_B1 += time_B1_vec[idx];
-	}
+assert(time_B1_vec.size() >= 1);
+float time_B1_avg = time_B1_vec[0];
+time_B1 = time_B1_avg;
+for(unsigned idx=1; idx<time_B1_vec.size(); ++idx) {
+    time_B1_avg = time_B1_avg + (time_B1_vec[idx] - time_B1_avg)/(idx+1); // running average
+    time_B1 += time_B1_vec[idx];
+}
 
-	assert(time_B2_vec.size() >= 1);
-	float time_B2_avg = time_B2_vec[0];
-	time_B2 = time_B2_avg;
-	for(unsigned idx=1; idx<time_B2_vec.size(); ++idx) {
-		time_B2_avg = time_B2_avg + (time_B2_vec[idx] - time_B2_avg)/(idx+1); // running average
-		time_B2 += time_B2_vec[idx];
-	}
+// With fused kernel, time_B2_vec may be empty - handle gracefully
+float time_B2_avg = 0.0f;
+if(time_B2_vec.size() >= 1) {
+    time_B2_avg = time_B2_vec[0];
+    time_B2 = time_B2_avg;
+    for(unsigned idx=1; idx<time_B2_vec.size(); ++idx) {
+        time_B2_avg = time_B2_avg + (time_B2_vec[idx] - time_B2_avg)/(idx+1);
+        time_B2 += time_B2_vec[idx];
+    }
+}
 
-	cout << "STATS" << "LINE = " << endl;
-	cout << "(1) total time_K1 = " << time_K1 << " ms" << endl;
-	cout << "(2) avg. time_B1 = " << time_B1_avg << " ms" << endl;
-	cout << "(3) total time_B1 = " << time_B1 << " ms" << endl;;
-	cout << "(4) avg. time_B2 = " << time_B2_avg << " ms" << endl;
-	cout << "(5) total time_B2 = " << time_B2 << " ms" << endl;
-	cout << "(6) total neighbor_filtering_time = " << time_neighbor_filtering  << " ms" << endl;
-	cout << "(7) total transfer_time (CPU <--> GPU) = " << time_transfer / 1000 << " ms" << endl;
-	cout << "(8) total neigbbour seek time = " << seek_neighbours_time /  1000 << " ms" << endl;
-	cout << "(9) Time elapsed in L2 Dist computation (GPU)= " << fp_set_time_gpu  << " ms" << endl;
+cout << "STATSLINE = " << endl;
+cout << "(1) total time_K1 = " << time_K1 << " ms" << endl;
+cout << "(2) avg. time_fused (filter+dist+sort) = " << time_B1_avg << " ms" << endl;
+cout << "(3) total time_fused = " << time_B1 << " ms" << endl;
+cout << "(4) avg. time_B2 = " << time_B2_avg << " ms (included in fused)" << endl;
+cout << "(5) total time_B2 = " << time_B2 << " ms (included in fused)" << endl;
+cout << "(6) total neighbor_filtering_time = " << time_neighbor_filtering  << " ms (included in fused)" << endl;
+cout << "(7) total transfer_time (CPU <--> GPU) = " << time_transfer / 1000 << " ms" << endl;
+cout << "(8) total neigbbour seek time = " << seek_neighbours_time /  1000 << " ms" << endl;
+cout << "(9) Time elapsed in L2 Dist computation (GPU)= " << fp_set_time_gpu  << " ms" << endl;
 
+// With fused kernel: time_B1 contains filter+dist+sort, so don't double count time_B2 and time_neighbor_filtering
+double totalTime = time_K1 + time_B1 + (time_transfer / 1000) + (seek_neighbours_time / 1000) + fp_set_time_gpu;
+double totalTime_wallclock = (nanoEnd - nanoStart)/1000.0;
+double throughput = (numQueries * 1000.0 * 1000.0) / totalTime_wallclock;
 
-	double totalTime = time_K1 + time_B1 + time_B2 + time_neighbor_filtering + (time_transfer / 1000) + (seek_neighbours_time / 1000)    ; // in ms
-	totalTime += fp_set_time_gpu  ;
-	double totalTime_wallclock = (nanoEnd - nanoStart)/1000.0;
-	double throughput = (numQueries * 1000.0 * 1000.0) / totalTime_wallclock;
-	// Note : (5) not included, becasue it is shadowed by (8)
-	cout << "Total time = (1) + (3) + (5) + (6) + (7) + (8) + (9) = " << totalTime << " ms" << endl;
-	cout << "Wall Clock Time = " << totalTime_wallclock << " microsec"<< endl;
-	cout << "Throughput = " << throughput << " QPS" << endl;
-	cout << "Throughput (Exclude Mem Transfers) = " << (numQueries * 1000.0) / ((totalTime_wallclock/1000.0) - time_transfer / 1000.0) << " QPS" << endl;
+cout << "Total time = (1) + (3) + (7) + (8) + (9) = " << totalTime << " ms" << endl;
+cout << "Wall Clock Time = " << totalTime_wallclock << " microsec"<< endl;
+cout << "Throughput = " << throughput << " QPS" << endl;
+cout << "Throughput (Exclude Mem Transfers) = " << (numQueries * 1000.0) / ((totalTime_wallclock/1000.0) - time_transfer / 1000.0) << " QPS" << endl;
 
 	// Computing the recall
 
@@ -999,103 +875,6 @@ while (1);
 
 
 
-
-/** This kernel filters out those nodes from the neighborhood of nodes in "d_parents" that  have already been processed before (in a previous iteration) and populates d_neighbors with only the new unseen ones.
- * @param d_neighbors This is populated by the kernel to store the the node ids that will be considered in the next iteration, for each query.
- * @param d_neighbors_temp This stores the node ids of the neighborhood of the nodes fetched from host, for every query.
- * @param d_numNeighbors_query This is populated by the kernel to store the number of nodes in d_neighbors, for every query.
- * @param d_numNeighbors_query_temp This stores the number of neighbors fetched from the host, for every query.
- * @param d_processed_bit_vec This is a boolean vector for keeping track of whether a node is processed on not.
- * @param beamWidth This is the beamwidth.
- */
-
-__global__ void neighbor_filtering_new (unsigned* d_neighbors,
-										unsigned* d_neighbors_temp,
-										unsigned* d_numNeighbors_query,
-										unsigned* d_numNeighbors_query_temp,
-										bool* d_processed_bit_vec,
-										unsigned* d_parents,
-										uint8_t* d_pIndex,
-										unsigned iter,
-										bool* d_nextIter) {
-
-
-	unsigned queryID = blockIdx.x;
-	unsigned tid = threadIdx.x;
-
-	if(d_parents[queryID*(SIZEPARENTLIST)]==0)	// If number of parent is zero, return.
-		return;
-
-	*d_nextIter = false;
-
-	unsigned offset_neighbors = queryID * (R+1); //Offset into d_neighbors_temp array
-	unsigned offset_bit_vec = queryID*BF_MEMORY;	//Offset into d_processed_bit_vec vector of bloom filter
-	bool* d_processed_bit_vec_start = d_processed_bit_vec + offset_bit_vec;
-	unsigned long long parentID;
-
-	if(iter==1){
-		// If this is first iteration, set the bits corresponding to MEDOID so that its not taken as parent in next iteration
-		parentID = MEDOID;
-		if(tid==0){
-			if(!((d_processed_bit_vec_start[hashFn1_d(MEDOID)]) 
-			//&& 
-			//(d_processed_bit_vec_start[hashFn2_d(MEDOID)])
-			)
-			) {
-				d_processed_bit_vec_start[hashFn1_d(MEDOID)] = true;
-				//d_processed_bit_vec_start[hashFn2_d(MEDOID)] = true;
-				unsigned old = atomicAdd(&d_numNeighbors_query[queryID], 1);
-				d_neighbors[offset_neighbors + old] = MEDOID;
-			}
-		}
-	}
-
-	else parentID = d_parents[queryID*(SIZEPARENTLIST)+1];
-
-	unsigned* bound = (unsigned*)(d_pIndex + ((unsigned long long)INDEX_ENTRY_LEN*parentID) + D*sizeof(datatype_t));
-	// For each neighbor of current parent in d_graph array check if its corresponding bits in the d_processed_bit_vec are already set
-	for(unsigned ii=tid; ii < *bound; ii += blockDim.x ) {
-		unsigned nbr = *(bound+1+ii);
-		if(!((d_processed_bit_vec_start[hashFn1_d(nbr)]) 
-		//&& 
-		//(d_processed_bit_vec_start[hashFn2_d(nbr)])
-		)) {
-			d_processed_bit_vec_start[hashFn1_d(nbr)] = true;
-			//d_processed_bit_vec_start[hashFn2_d(nbr)] = true;
-			unsigned old = atomicAdd(&d_numNeighbors_query[queryID], 1);
-			d_neighbors[offset_neighbors + old] = nbr;
-		}
-	}
-	//__syncthreads();
-
-
-}
-
-/*Hash functions used for bloom filters */
-__device__ unsigned hashFn1_d(unsigned x) {
-
-	// FNV-1a hash
-	uint64_t hash = 0xcbf29ce4;
-	hash = (hash ^ (x & 0xff)) * 0x01000193 ;
-	hash = (hash ^ ((x >> 8) & 0xff)) * 0x01000193;
-	hash = (hash ^ ((x >> 16) & 0xff)) * 0x01000193;
-	hash = (hash ^ ((x >> 24) & 0xff)) * 0x01000193;
-
-	return hash % (BF_ENTRIES );
-}
-
-__device__ unsigned hashFn2_d(unsigned x) {
-
-	// FNV-1a hash
-	uint64_t hash = 0x84222325;
-	hash = (hash ^ (x & 0xff)) * 0x1B3;
-	hash = (hash ^ ((x >> 8) & 0xff)) * 0x1B3;
-	hash = (hash ^ ((x >> 16) & 0xff)) * 0x1B3;
-	hash = (hash ^ ((x >> 24) & 0xff)) * 0x1B3;
-	return hash % (BF_ENTRIES);
-}
-
-
 /**
  * This kernel computes distance of the neighbour from the medoid using the compressed vectors
  * THe main intent to is to access the compressed vectors of the neighbour and not the distance calculation (which is dummy operation) as such
@@ -1124,60 +903,6 @@ __global__ void  compute_neighborDist_par_cachewarmup(unsigned* d_neighbors,
 		}
 	}
 }
-
-
-/**
- * This kernel computes for every query, the distance between the neighbors and the query through lookups to the PQ Dist Table and the compressed vectors of the neighbors.
- * @param d_neighbors This is the concatenated list of node ids for all queries whose distances have to be computed with the respective queries.
- * @param d_numNeighbors_query This stores for every query the number of nodes in d_neighbors.
- * @param d_compressedVectors This contains the compressed vectors of all the nodes in the dataset.
- * @param d_pqDistTables This is the concatenated PQ Distance Tables of all the queries.
- * @param d_neighborsDist_query This is populated by the kernel with the distances between the node ids in d_neighbors and the respective query for all queries.
- * @param beamWidth This is the beamwidth.
- */
-
-__global__ void  compute_neighborDist_par(unsigned* d_neighbors,
-											unsigned* d_numNeighbors_query,
-											float*  d_neighborsDist_query,
-											datatype_t* d_queriesFP,
-											uint8_t* d_pIndex) {
-
-	unsigned tid = threadIdx.x;
-	unsigned queryID = blockIdx.x;
-	//__shared__ unsigned shm_neighbours[R+1];
-
-	unsigned numNeighbors = d_numNeighbors_query[queryID];
-	unsigned queryNeighbors_start  = queryID * (R+1);	// offset into d_neighbors array
-	float* d_neighborsDist_query_start = d_neighborsDist_query + queryNeighbors_start;
-	datatype_t* d_queriesFP_start = d_queriesFP+(queryID*D);
-
-/*
-	for(unsigned uIter = tid; uIter < numNeighbors; uIter += blockDim.x){
-		d_neighborsDist_query_start[ uIter] = 0.0;
-		//shm_neighbours[uIter] = d_neighbors[queryNeighbors_start + uIter];
-	}*/
-	//__syncthreads();		
-	
-	//	__syncthreads();
-	#define THREADS_PER_NEIGHBOR 8	
-	typedef cub::WarpReduce<float,THREADS_PER_NEIGHBOR> WarpReduce;
-	__shared__ typename WarpReduce::TempStorage temp_storage[R];
-
-	//blockDim.x need to be multiple of THREADS_PER_NEIGHBOR
-	for( unsigned j = tid/THREADS_PER_NEIGHBOR; j < numNeighbors; j += (blockDim.x)/THREADS_PER_NEIGHBOR ) { // assign eight threads to a neighbor, within a query
-		unsigned long long myNeighbor = d_neighbors[ queryNeighbors_start + j]; 
-		
-		datatype_t* pBase = (datatype_t*)(d_pIndex+(myNeighbor*INDEX_ENTRY_LEN));
-		float sum = 0.0f;
-		for(unsigned i = tid%THREADS_PER_NEIGHBOR; i < D; i +=  THREADS_PER_NEIGHBOR){
-			float diff = (float)(*(pBase+i)) - (float)d_queriesFP_start[i];	// d_quriesFP must contain float
-			sum += diff*diff;	// Parallel execution
-		}
-		d_neighborsDist_query_start[j] = WarpReduce(temp_storage[j]).Sum(sum);
-		//atomicAdd(&d_neighborsDist_query[queryNeighbors_start + j], sum);
-	}
-}
-
 
 
 __global__ void compute_L2Dist (datatype_t* d_FPSetCoordsList,
@@ -1495,205 +1220,6 @@ __global__ void  compute_BestLSets_par_merge(unsigned* d_neighbors,
 
 }
 #else
-
-__global__ void  compute_BestLSets_par_sort_msort_new(unsigned* d_neighbors,
-													//unsigned* d_neighbors_aux,
-													unsigned* d_numNeighbors_query,
-													float* d_neighborsDist_query,
-													//float* d_neighborsDist_query_aux,
-													unsigned* d_BestLSets,
-													float* d_BestLSetsDist,
-													bool* d_BestLSets_visited,
-													unsigned* d_parents,
-													unsigned iter,
-													bool* d_nextIter,
-													unsigned* d_BestLSets_count,
-													unsigned* d_L2ParentIds,
-													unsigned* d_FPSetCoordsList_Counts,
-													unsigned* d_numQueries													
-													) {
-	unsigned tid = threadIdx.x;
-    unsigned queryID = blockIdx.x;
-    unsigned numNeighbors = d_numNeighbors_query[queryID];
-    *d_nextIter = false;
-
-    __shared__ unsigned shm_pos[R+1];
-    unsigned offset = queryID*(R+1);	// Offset into d_neighborsDist_query, shm_neighborsDist_query_aux, d_neighbors_aux and d_neighbors arrays
-
-	__shared__ float shm_neighborsDist_query_aux[R+1];
-	__shared__ unsigned shm_neighbors_aux[R+1];
-
-
-	__shared__ float shm_neighborsDist_query[R]; // R+1 is an upperbound on the number of neighbors
-	__shared__ float shm_currBestLSetsDist[L];
-	__shared__ float shm_BestLSetsDist[L];
-	__shared__ unsigned shm_pos1[R+L+1];
-	__shared__ unsigned shm_BestLSets[L];
-	__shared__ bool shm_BestLSets_visited[L];
-	__shared__ unsigned Temp;
-	
-	// perform parallel merge sort
-	for(unsigned subArraySize=2; subArraySize< 2*numNeighbors; subArraySize *= 2){
-		unsigned subArrayID = tid/subArraySize;
-		unsigned start = subArrayID * subArraySize;
-		unsigned mid = min(start + subArraySize/2, numNeighbors);
-		unsigned end = min(start + subArraySize, numNeighbors);
-
-		if(tid >= start && tid < mid){
-			unsigned lowerBound = lower_bound_d(&d_neighborsDist_query[offset + mid], 0, end-mid, d_neighborsDist_query[offset + tid]);
-			shm_pos[tid] = lowerBound + tid;	// Position for this element
-		}
-
-		if(tid >= mid && tid < end)  {
-			unsigned upperBound = upper_bound_d(&d_neighborsDist_query[offset + start], 0, mid-start, d_neighborsDist_query[offset + tid]);
-			shm_pos[tid] = start + (upperBound + tid-mid);	// Position for this element
-
-		}
-		__syncthreads();
-		__threadfence_block();
-
-		// Copy the neighbors to auxiliary array at their correct position
-		for(int i=tid; i < numNeighbors; i += blockDim.x) {
-			shm_neighborsDist_query_aux[ shm_pos[i]] = d_neighborsDist_query[offset+i];
-			shm_neighbors_aux[shm_pos[i]] = d_neighbors[offset+i];
-		}
-		__syncthreads();
-		#if 1
-		// Copy the auxiliary array to original array
-		for(int i=tid; i < numNeighbors; i += blockDim.x) {
-			d_neighborsDist_query[offset + i] = shm_neighborsDist_query_aux[i];
-			d_neighbors[offset + i] = shm_neighbors_aux[i];
-		}
-		__syncthreads();
-		#endif
-	}
-	//}
-	//{
-	__syncthreads();
-	#if 1
-	for(int i=tid; i < numNeighbors; i += blockDim.x) {
-			shm_neighborsDist_query_aux[i] = d_neighborsDist_query[offset + i];
-			shm_neighbors_aux[i] = d_neighbors[offset + i];
-		}
-	__syncthreads();
-	//unsigned queryID = blockIdx.x;
-	//unsigned numNeighbors = d_numNeighbors_query[queryID];
-	//unsigned tid = threadIdx.x;
-
-	 unsigned Best_L_Set_size  ;// = 0;
-	 unsigned newBest_L_Set_size ; //= d_BestLSets_count[queryID];
-	 __shared__ unsigned nbrsBound;
-	//unsigned offset = queryID*(R+1);
-	//unsigned numQueries = *d_numQueries;
-
-
-	if(numNeighbors > 0){	// If the number of neighbors after filteration is zero then no sense of merging
-
-        if(iter==1){	// If this is the first call to compute_BestLSets_par_merge by this query then initialize d_BestLSets, d_BestLSetsDist...
-                nbrsBound = min(numNeighbors,L);
-                for(unsigned ii=tid; ii < nbrsBound; ii += blockDim.x) {
-                        unsigned nbr =  shm_neighbors_aux[ ii];
-                        d_BestLSets[queryID*L + tid] = nbr;
-                        d_BestLSetsDist[queryID*L + tid] =   shm_neighborsDist_query_aux[ ii];
-                        d_BestLSets_visited[queryID*L + tid] = ( nbr == MEDOID);
-                }
-                __syncthreads();
-                newBest_L_Set_size = nbrsBound;
-                d_BestLSets_count[queryID] = nbrsBound;
-        }
-        else {
-                Best_L_Set_size = d_BestLSets_count[queryID];
-
-                float maxBestLSetDist = d_BestLSetsDist[L*queryID+Best_L_Set_size-1];
-				Temp = min(L,numNeighbors);
-				if (tid == 0) {
-                for(nbrsBound = 0; nbrsBound < Temp ; ++nbrsBound) {
-                        if(shm_neighborsDist_query_aux[ nbrsBound] >= maxBestLSetDist){
-                                break;
-                        }
-                }
-				}
-				__syncthreads();
-
-                nbrsBound = max(nbrsBound, min(L-Best_L_Set_size, numNeighbors));	//Added by saim
-                // if both Best_L_Set_size and numNeighbors is less than L, then the max of the two will be the newBest_L_Set_size otherwise it will be L
-                newBest_L_Set_size = min(Best_L_Set_size + nbrsBound, L);			//Updated by saim
-
-                d_BestLSets_count[queryID] = newBest_L_Set_size;
-
-
-			/*perform parallel merge */
-               /* for(int i=tid; i < nbrsBound; i += blockDim.x) {
-                        shm_neighborsDist_query[i] = shm_neighborsDist_query_aux[ i];
-                }*/
-                for(int i=tid; i < Best_L_Set_size; i += blockDim.x) {
-                        shm_currBestLSetsDist[i] = d_BestLSetsDist[L*queryID+i];
-                }
-                __syncthreads();
-                if(tid < nbrsBound) {
-                        shm_pos1[tid] =  lower_bound_d(shm_currBestLSetsDist, 0, Best_L_Set_size, shm_neighborsDist_query_aux[tid]) + tid;
-                }
-                if( tid >= nbrsBound && tid < (nbrsBound + Best_L_Set_size)) {
-                        shm_pos1[tid] =  upper_bound_d(shm_neighborsDist_query_aux, 0, nbrsBound, shm_currBestLSetsDist[tid-nbrsBound]) + (tid-nbrsBound);
-                }
-
-                __syncthreads();
-                __threadfence_block();
-
-                // all threads of the block have populated the positions array in shared memory
-                if(tid < nbrsBound && shm_pos1[tid] < newBest_L_Set_size)  {
-                        shm_BestLSetsDist[shm_pos1[tid]] = shm_neighborsDist_query_aux[tid];
-                        shm_BestLSets[shm_pos1[tid]] = shm_neighbors_aux[tid];
-                        shm_BestLSets_visited[shm_pos1[tid]] = false;
-                }
-				Temp = (nbrsBound + Best_L_Set_size);
-                if(tid >= nbrsBound && tid < (Temp) && shm_pos1[tid] < newBest_L_Set_size) {
-                        shm_BestLSetsDist[shm_pos1[tid]] = shm_currBestLSetsDist[tid-nbrsBound];
-                        shm_BestLSets[shm_pos1[tid]] = d_BestLSets[queryID*L+(tid-nbrsBound)];
-                        shm_BestLSets_visited[shm_pos1[tid]] = d_BestLSets_visited[queryID*L+(tid-nbrsBound)];
-                }
-                __syncthreads();
-                __threadfence_block();
-
-                //Copying back from shared memory to device array
-                if (tid < newBest_L_Set_size) {
-                        d_BestLSetsDist[L*queryID+tid] = shm_BestLSetsDist[tid];
-                        d_BestLSets[L*queryID+tid] = shm_BestLSets[tid];
-                        d_BestLSets_visited[L*queryID+tid] = shm_BestLSets_visited[tid];
-                    }
-                __syncthreads();
-                //__threadfence_block();
-        }
-	}
-
-	if(tid == 0) {
-			unsigned parentIndex = 0;
-			for(unsigned ii=0; ii < newBest_L_Set_size; ++ii) {
-				if(!d_BestLSets_visited[L*queryID + ii]) 
-				{
-					parentIndex++;
-					d_BestLSets_visited[L*queryID + ii] = true;
-					d_parents[queryID*(SIZEPARENTLIST)] = parentIndex;
-					d_parents[queryID*(SIZEPARENTLIST)+parentIndex] = d_BestLSets[L*queryID + ii];
-					*d_nextIter = true;
-					break;
-				}
-			}
-			#if 0
-			d_parents[queryID*(SIZEPARENTLIST)] = parentIndex;
-			if(parentIndex != 0) // parentIndex == 0 is the termination condition for the algorithm.
-				{
-					*d_nextIter = true;
-					// Note: One thread assigned to one Query, so ok to increment (no contention)
-					//d_FPSetCoordsList_Counts[queryID]++;
-					// ToDo : Ensure to put MEDOID as the first parent
-					//d_L2ParentIds[(iter * numQueries) + queryID] = d_parents[queryID*(SIZEPARENTLIST)+parentIndex];
-				}
-			#endif
-	}
-#endif
-}
-
 
 #endif
 
